@@ -2028,7 +2028,7 @@ function createPendingInboundMerge(event: InboundTextEvent): PendingInboundMerge
 
 function shouldScheduleSlashCommand(command: { name?: string | null; args?: string[] | null } | null | undefined): boolean {
   const name = String(command?.name ?? '').trim().toLowerCase();
-  if (!name || !['review', 'rv'].includes(name)) {
+  if (!name || !['goal', 'review', 'rv'].includes(name)) {
     return false;
   }
   const args = Array.isArray(command?.args) ? command.args : [];

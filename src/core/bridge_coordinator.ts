@@ -1376,7 +1376,7 @@ export class BridgeCoordinator {
       case 'experimental':
         return this.handleExperimentalCommand(event, command.args);
       case 'goal':
-        return this.handleGoalCommand(event, command.args);
+        return this.handleGoalCommand(event, command.args, options);
       case 'personality':
         return this.handlePersonalityCommand(event, command.args);
       case 'instructions':
@@ -4701,7 +4701,7 @@ export class BridgeCoordinator {
     }
   }
 
-  async handleGoalCommand(event, args) {
+  async handleGoalCommand(event, args, options: StartTurnOptions = {}) {
     if (!(await this.isCodexGoalCommandAvailable())) {
       return messageResponse([
         this.t('coordinator.goal.unavailable'),
@@ -4717,7 +4717,7 @@ export class BridgeCoordinator {
       return this.pauseThreadGoal(event);
     }
     if (action === 'resume') {
-      return this.resumeThreadGoal(event);
+      return this.resumeThreadGoal(event, options);
     }
     if (action === 'clear' || action === 'reset' || action === 'off') {
       return this.clearThreadGoal(event);
@@ -4725,7 +4725,7 @@ export class BridgeCoordinator {
     if (action === 'show' || action === 'status') {
       return this.renderGoalStatus(event);
     }
-    return this.setThreadGoal(event, normalizedArgs.join(' '));
+    return this.setThreadGoal(event, normalizedArgs.join(' '), options);
   }
 
   async renderGoalStatus(event) {
@@ -4763,17 +4763,25 @@ export class BridgeCoordinator {
     return messageResponse(lines, buildSessionMeta(resolved.session));
   }
 
-  async setThreadGoal(event, goalText: string) {
+  async setThreadGoal(event, goalText: string, options: StartTurnOptions = {}) {
     const resolved = await this.resolveNativeGoalCommandContext(event);
     if ('response' in resolved) {
       return resolved.response;
     }
     try {
+      if (typeof resolved.providerPlugin.setThreadGoalAndFollow === 'function') {
+        return await this.setThreadGoalAndFollowNativeTurn(event, resolved, {
+          objective: goalText,
+          status: null,
+          successKey: 'coordinator.goal.saved',
+          fallbackObjective: goalText,
+          options,
+        });
+      }
       const goal = await resolved.providerPlugin.setThreadGoal({
         providerProfile: resolved.providerProfile,
         threadId: resolved.session.codexThreadId,
         objective: goalText,
-        suppressAutoTurn: true,
       });
       return messageResponse([
         this.t('coordinator.goal.saved'),
@@ -4789,12 +4797,139 @@ export class BridgeCoordinator {
     }
   }
 
+  async setThreadGoalAndFollowNativeTurn(
+    event,
+    resolved,
+    {
+      objective = null,
+      status = null,
+      successKey,
+      fallbackObjective,
+      options = {},
+    }: {
+      objective?: string | null;
+      status?: string | null;
+      successKey: string;
+      fallbackObjective: string;
+      options?: StartTurnOptions;
+    },
+  ) {
+    const scopeRef = resolved.scopeRef ?? toScopeRef(event);
+    const existingActiveTurn = await this.reconcileActiveTurn(scopeRef);
+    let ownedActiveTurn = null;
+    let localTurnFinished = false;
+    if (!existingActiveTurn) {
+      ownedActiveTurn = this.activeTurns?.beginScopeTurn(scopeRef, {
+        bridgeSessionId: resolved.session.id,
+        providerProfileId: resolved.providerProfile.id,
+        threadId: resolved.session.codexThreadId,
+      }) ?? null;
+    }
+
+    try {
+      const follow = await resolved.providerPlugin.setThreadGoalAndFollow({
+        providerProfile: resolved.providerProfile,
+        threadId: resolved.session.codexThreadId,
+        objective,
+        status,
+        onGoalUpdated: async (goal) => {
+          await emitProgressUpdate(
+            options.onProgress ?? null,
+            this.renderGoalFollowReceipt(successKey, goal, fallbackObjective),
+            'commentary',
+          );
+        },
+        onProgress: options.onProgress ?? null,
+        onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
+          debugCoordinator('goal_turn_started', {
+            platform: scopeRef.platform,
+            scopeId: scopeRef.externalScopeId,
+            bridgeSessionId: resolved.session.id,
+            providerProfileId: resolved.providerProfile.id,
+            threadId: meta.threadId ?? resolved.session.codexThreadId,
+            turnId: meta.turnId ?? null,
+          });
+          let active = null;
+          if (ownedActiveTurn) {
+            active = this.activeTurns?.updateScopeTurn(scopeRef, {
+              bridgeSessionId: resolved.session.id,
+              providerProfileId: resolved.providerProfile.id,
+              threadId: meta.threadId ?? resolved.session.codexThreadId,
+              turnId: meta.turnId ?? null,
+            }) ?? null;
+          }
+          if (typeof options.onTurnStarted === 'function') {
+            await options.onTurnStarted({
+              turnId: meta.turnId ?? null,
+              threadId: meta.threadId ?? resolved.session.codexThreadId,
+              bridgeSessionId: resolved.session.id,
+              providerProfileId: resolved.providerProfile.id,
+            });
+          }
+          if (active?.interruptRequested && active.turnId && !active.interruptDispatched) {
+            await this.dispatchInterruptForActiveTurn(active);
+          }
+        },
+        onApprovalRequest: async (request: ProviderApprovalRequest) => {
+          if (ownedActiveTurn) {
+            this.activeTurns?.addPendingApproval(scopeRef, request);
+          }
+          if (typeof options.onApprovalRequest === 'function') {
+            await options.onApprovalRequest(request);
+          }
+        },
+      });
+
+      if (follow?.turnResult) {
+        localTurnFinished = isTurnResultLocallyFinished(follow.turnResult);
+        const response = turnResponse(follow.turnResult, this.currentI18n, buildSessionMeta(resolved.session));
+        response.meta = {
+          ...(response.meta ?? {}),
+          codexTurn: {
+            outputState: follow.turnResult.outputState ?? 'complete',
+            previewText: follow.turnResult.previewText ?? '',
+            finalSource: follow.turnResult.finalSource ?? 'thread_items',
+            errorMessage: follow.turnResult.errorMessage ?? '',
+          },
+        };
+        return response;
+      }
+
+      const goal = follow?.goal ?? null;
+      const lines = [
+        this.t(successKey),
+        this.t('coordinator.goal.currentLabel'),
+        goal?.objective ?? fallbackObjective,
+        this.formatNativeGoalStatus(goal?.status ?? status ?? 'active'),
+        this.t('coordinator.goal.noAutoTurn'),
+      ];
+      return messageResponse(lines, buildSessionMeta(resolved.session));
+    } finally {
+      if (ownedActiveTurn) {
+        await this.releaseActiveTurnIfStillRunning(scopeRef, {
+          localTurnFinished,
+          expectedActiveTurn: ownedActiveTurn,
+        });
+      }
+    }
+  }
+
+  renderGoalFollowReceipt(successKey: string, goal, fallbackObjective: string): string {
+    return [
+      this.t(successKey),
+      this.t('coordinator.goal.currentLabel'),
+      goal?.objective ?? fallbackObjective,
+      this.formatNativeGoalStatus(goal?.status ?? 'active'),
+      this.t('coordinator.goal.started'),
+    ].join('\n');
+  }
+
   async pauseThreadGoal(event) {
     return this.updateThreadGoalStatus(event, 'paused', 'coordinator.goal.paused');
   }
 
-  async resumeThreadGoal(event) {
-    return this.updateThreadGoalStatus(event, 'active', 'coordinator.goal.resumed');
+  async resumeThreadGoal(event, options: StartTurnOptions = {}) {
+    return this.updateThreadGoalStatus(event, 'active', 'coordinator.goal.resumed', options);
   }
 
   async clearThreadGoal(event) {
@@ -4825,7 +4960,7 @@ export class BridgeCoordinator {
     }
   }
 
-  async updateThreadGoalStatus(event, status, successKey) {
+  async updateThreadGoalStatus(event, status, successKey, options: StartTurnOptions = {}) {
     const resolved = await this.resolveNativeGoalCommandContext(event);
     if ('response' in resolved) {
       return resolved.response;
@@ -4838,11 +4973,19 @@ export class BridgeCoordinator {
       if (!currentGoal?.objective) {
         return this.renderGoalStatus(event);
       }
+      if (status === 'active' && typeof resolved.providerPlugin.setThreadGoalAndFollow === 'function') {
+        return await this.setThreadGoalAndFollowNativeTurn(event, resolved, {
+          objective: null,
+          status,
+          successKey,
+          fallbackObjective: currentGoal.objective,
+          options,
+        });
+      }
       const nextGoal = await resolved.providerPlugin.setThreadGoal({
         providerProfile: resolved.providerProfile,
         threadId: resolved.session.codexThreadId,
         status,
-        suppressAutoTurn: status === 'active',
       });
       return messageResponse([
         this.t(successKey),

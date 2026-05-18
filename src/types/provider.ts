@@ -139,6 +139,7 @@ export interface ProviderThreadSummary {
   threadId: string;
   cwd: string | null;
   title: string | null;
+  status?: string | null;
   updatedAt?: number | null;
   preview?: string | null;
   turns?: ProviderThreadTurn[] | null;
@@ -155,6 +156,14 @@ export interface ProviderThreadGoal {
   timeUsedSeconds?: number | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+}
+
+export interface ProviderThreadGoalFollowResult {
+  goal: ProviderThreadGoal | null;
+  turnResult?: ProviderTurnResult | null;
+  turnId?: string | null;
+  threadStatus?: string | null;
+  resumedThread?: boolean;
 }
 
 export interface ProviderThreadStartResult {
@@ -444,6 +453,17 @@ export interface ProviderPluginContract {
     status?: string | null;
     suppressAutoTurn?: boolean;
   }): Promise<ProviderThreadGoal | null>;
+  setThreadGoalAndFollow?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    onGoalUpdated?: ((goal: ProviderThreadGoal | null) => Promise<void> | void) | null;
+    onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+    timeoutMs?: number;
+  }): Promise<ProviderThreadGoalFollowResult>;
   clearThreadGoal?(params: {
     providerProfile: ProviderProfile;
     threadId: string;

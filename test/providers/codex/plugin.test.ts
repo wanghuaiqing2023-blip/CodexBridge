@@ -226,6 +226,69 @@ test('CodexProviderPlugin forwards native thread goal operations to the app clie
   ]);
 });
 
+test('CodexProviderPlugin forwards native thread goal follow operations to the app client', async () => {
+  const calls: any[] = [];
+  const callbacks: any[] = [];
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async setThreadGoalAndFollow(params: any) {
+      calls.push(['setThreadGoalAndFollow', params]);
+      await params.onGoalUpdated?.({
+        threadId: params.threadId,
+        objective: params.objective,
+        status: 'active',
+      });
+      await params.onTurnStarted?.({
+        threadId: params.threadId,
+        turnId: 'goal-turn-1',
+      });
+      return {
+        goal: {
+          threadId: params.threadId,
+          objective: params.objective,
+          status: 'active',
+        },
+        turnId: 'goal-turn-1',
+        turnResult: {
+          threadId: params.threadId,
+          turnId: 'goal-turn-1',
+          outputText: 'done',
+          outputState: 'complete',
+          previewText: '',
+          finalSource: 'thread_items',
+        },
+      };
+    },
+  }));
+
+  const profile = makeProfile({ defaultModel: 'gpt-5.4' });
+  const result = await plugin.setThreadGoalAndFollow({
+    providerProfile: profile,
+    threadId: 'thread-1',
+    objective: 'Keep CodexBridge reliable.',
+    onGoalUpdated: (goal: any) => {
+      callbacks.push(['goal', goal?.objective]);
+    },
+    onTurnStarted: (meta: any) => {
+      callbacks.push(['turn', meta?.turnId]);
+    },
+    timeoutMs: 1234,
+  });
+
+  assert.equal(result.turnId, 'goal-turn-1');
+  assert.equal(result.turnResult?.outputText, 'done');
+  assert.deepEqual(callbacks, [
+    ['goal', 'Keep CodexBridge reliable.'],
+    ['turn', 'goal-turn-1'],
+  ]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.[0], 'setThreadGoalAndFollow');
+  assert.equal(calls[0]?.[1]?.threadId, 'thread-1');
+  assert.equal(calls[0]?.[1]?.objective, 'Keep CodexBridge reliable.');
+  assert.equal(calls[0]?.[1]?.status, null);
+  assert.equal(calls[0]?.[1]?.timeoutMs, 1234);
+});
+
 test('CodexProviderPlugin clamps unsupported reasoning efforts to the model fallback', async () => {
   const seenEfforts: any[] = [];
   const plugin = makePlugin(() => ({

@@ -172,6 +172,7 @@ class FakeProviderPlugin {
   setSkillEnabledCalls: any[];
   archiveThreadCalls: any[];
   unarchiveThreadCalls: any[];
+  setThreadGoalAndFollowCalls: any[];
   usageReport: any;
   skillEntries: any[];
   skillErrors: any[];
@@ -188,6 +189,7 @@ class FakeProviderPlugin {
   threads: Map<any, any>;
   archivedThreadIds: Set<any>;
   threadGoals: Map<any, any>;
+  goalFollowHandler: any;
 
   constructor(kind: string, options: { replyPrefix?: string; models?: any[] } = {}) {
     const { replyPrefix = '', models = null } = options;
@@ -288,6 +290,7 @@ class FakeProviderPlugin {
     this.setSkillEnabledCalls = [];
     this.archiveThreadCalls = [];
     this.unarchiveThreadCalls = [];
+    this.setThreadGoalAndFollowCalls = [];
     this.usageReport = null;
     this.skillEntries = [];
     this.skillErrors = [];
@@ -308,6 +311,7 @@ class FakeProviderPlugin {
     this.threads = new Map();
     this.archivedThreadIds = new Set();
     this.threadGoals = new Map();
+    this.goalFollowHandler = null;
   }
 
   nextUpdatedAt() {
@@ -417,6 +421,24 @@ class FakeProviderPlugin {
     };
     this.threadGoals.set(threadId, next);
     return { ...next };
+  }
+
+  async setThreadGoalAndFollow(params) {
+    this.setThreadGoalAndFollowCalls.push(params);
+    if (typeof this.goalFollowHandler === 'function') {
+      return await this.goalFollowHandler(params);
+    }
+    const goal = await this.setThreadGoal(params);
+    if (typeof params.onGoalUpdated === 'function') {
+      await params.onGoalUpdated(goal);
+    }
+    return {
+      goal,
+      turnId: null,
+      threadStatus: null,
+      resumedThread: false,
+      turnResult: null,
+    };
   }
 
   async clearThreadGoal({ threadId }) {
@@ -5232,6 +5254,161 @@ test('/goal stays hidden until goals is enabled and then manages the native goal
   });
   assert.equal(cleared.messages[0]?.text ?? '', '已清除当前线程目标。');
   assert.equal(openai.threadGoals.has(session?.codexThreadId ?? ''), false);
+});
+
+test('/goal set follows a hot native goal turn and releases the active turn after final output', async () => {
+  const codexExperimentalFeaturesManager = makeFakeCodexExperimentalFeaturesManager([
+    { name: 'goals', maturity: 'experimental', enabled: true },
+  ]);
+  const { runtime, openai } = makeRuntime({
+    codexExperimentalFeaturesManager,
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-hot',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-hot',
+  });
+  assert.ok(session);
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-hot',
+  };
+
+  openai.goalFollowHandler = async (params) => {
+    const goal = await openai.setThreadGoal(params);
+    await params.onGoalUpdated?.(goal);
+    await params.onTurnStarted?.({
+      threadId: params.threadId,
+      turnId: 'goal-turn-hot-1',
+    });
+    assert.equal(
+      runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId,
+      'goal-turn-hot-1',
+    );
+    await params.onProgress?.({
+      text: 'Goal progress from native turn.',
+      delta: 'Goal progress from native turn.',
+      outputKind: 'commentary',
+    });
+    return {
+      goal,
+      turnId: 'goal-turn-hot-1',
+      threadStatus: 'idle',
+      resumedThread: false,
+      turnResult: {
+        threadId: params.threadId,
+        turnId: 'goal-turn-hot-1',
+        title: null,
+        outputText: 'Goal final from native turn.',
+        outputState: 'complete',
+        previewText: '',
+        finalSource: 'thread_items',
+        status: 'completed',
+      },
+    };
+  };
+
+  const progress: any[] = [];
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-hot',
+    text: '/goal Keep CodexBridge visible in WeChat.',
+  }, {
+    onProgress: async (entry: any) => {
+      progress.push(entry);
+    },
+  });
+
+  assert.equal(result.messages[0]?.text, 'Goal final from native turn.');
+  assert.equal(openai.setThreadGoalAndFollowCalls.length, 1);
+  assert.equal(openai.setThreadGoalAndFollowCalls[0]?.objective, 'Keep CodexBridge visible in WeChat.');
+  assert.equal(openai.threadGoals.get(session.codexThreadId)?.status, 'active');
+  assert.match(progress[0]?.text ?? '', /Keep CodexBridge visible in WeChat/);
+  assert.equal(progress.at(-1)?.text, 'Goal progress from native turn.');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+});
+
+test('/goal resume follows a cold-thread native goal turn and still produces visible output', async () => {
+  const codexExperimentalFeaturesManager = makeFakeCodexExperimentalFeaturesManager([
+    { name: 'goals', maturity: 'experimental', enabled: true },
+  ]);
+  const { runtime, openai } = makeRuntime({
+    codexExperimentalFeaturesManager,
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-cold',
+    text: '/new',
+  });
+  const session = runtime.services.bridgeSessions.resolveScopeSession({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-cold',
+  });
+  assert.ok(session);
+  await openai.setThreadGoal({
+    threadId: session.codexThreadId,
+    objective: 'Resume cold goal.',
+    status: 'paused',
+  });
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-cold',
+  };
+
+  openai.goalFollowHandler = async (params) => {
+    assert.equal(params.objective, null);
+    assert.equal(params.status, 'active');
+    const goal = await openai.setThreadGoal(params);
+    await params.onGoalUpdated?.(goal);
+    await params.onTurnStarted?.({
+      threadId: params.threadId,
+      turnId: 'goal-turn-cold-1',
+    });
+    assert.equal(
+      runtime.services.activeTurns.resolveScopeTurn(scopeRef)?.turnId,
+      'goal-turn-cold-1',
+    );
+    return {
+      goal,
+      turnId: 'goal-turn-cold-1',
+      threadStatus: 'notLoaded',
+      resumedThread: true,
+      turnResult: {
+        threadId: params.threadId,
+        turnId: 'goal-turn-cold-1',
+        title: null,
+        outputText: 'Cold goal final from native turn.',
+        outputState: 'complete',
+        previewText: '',
+        finalSource: 'thread_items',
+        status: 'completed',
+      },
+    };
+  };
+
+  const progress: any[] = [];
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-goal-follow-cold',
+    text: '/goal resume',
+  }, {
+    onProgress: async (entry: any) => {
+      progress.push(entry);
+    },
+  });
+
+  assert.equal(result.messages[0]?.text, 'Cold goal final from native turn.');
+  assert.equal(openai.setThreadGoalAndFollowCalls.length, 1);
+  assert.equal(openai.setThreadGoalAndFollowCalls[0]?.status, 'active');
+  assert.equal(openai.threadGoals.get(session.codexThreadId)?.status, 'active');
+  assert.match(progress[0]?.text ?? '', /Resume cold goal/);
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
 });
 
 test('legacy service tier values are normalized to fast/flex in status output', async () => {

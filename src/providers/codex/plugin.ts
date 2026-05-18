@@ -22,6 +22,7 @@ import type {
   ProviderPluginsListResult,
   ProviderSkillsListResult,
   ProviderThreadGoal,
+  ProviderThreadGoalFollowResult,
   ProviderThreadListResult,
   ProviderThreadStartResult,
   ProviderThreadSummary,
@@ -151,6 +152,40 @@ export class CodexProviderPlugin {
       objective,
       status,
       suppressAutoTurn,
+    });
+  }
+
+  async setThreadGoalAndFollow({
+    providerProfile,
+    threadId,
+    objective = null,
+    status = null,
+    onGoalUpdated = null,
+    onProgress = null,
+    onTurnStarted = null,
+    onApprovalRequest = null,
+    timeoutMs,
+  }: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    objective?: string | null;
+    status?: string | null;
+    onGoalUpdated?: ((goal: ProviderThreadGoal | null) => Promise<void> | void) | null;
+    onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
+    onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
+    onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+    timeoutMs?: number;
+  }): Promise<ProviderThreadGoalFollowResult> {
+    const client = await this.ensureClient(providerProfile);
+    return client.setThreadGoalAndFollow({
+      threadId,
+      objective,
+      status,
+      onGoalUpdated,
+      onProgress,
+      onTurnStarted,
+      onApprovalRequest,
+      timeoutMs,
     });
   }
 

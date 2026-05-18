@@ -138,6 +138,295 @@ test('CodexAppClient normalizes second-based thread timestamps to milliseconds',
   assert.equal(result?.updatedAt, 1776425803000);
 });
 
+test('CodexAppClient maps native thread status from app-server thread reads', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method) => {
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Bridge thread',
+          cwd: '/tmp/work',
+          status: { type: 'notLoaded' },
+          turns: [],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.readThread('thread-1', false);
+
+  assert.equal(result?.status, 'notLoaded');
+});
+
+test('CodexAppClient maps native thread status from app-server thread lists', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  client.request = async (method) => {
+    if (method === 'thread/list') {
+      return {
+        data: [{
+          id: 'thread-1',
+          name: 'Bridge thread',
+          cwd: '/tmp/work',
+          status: { type: 'idle' },
+          preview: '',
+        }],
+        nextCursor: null,
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.listThreads({ limit: 10 });
+
+  assert.equal(result.items[0]?.status, 'idle');
+});
+
+test('CodexAppClient setThreadGoal no longer interrupts native auto-started goal turns', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const calls: Array<{ method: string; params: any }> = [];
+
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/goal/set') {
+      return {
+        goal: {
+          threadId: params.threadId,
+          objective: params.objective,
+          status: 'active',
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const goal = await client.setThreadGoal({
+    threadId: 'thread-1',
+    objective: 'Keep going',
+    suppressAutoTurn: true,
+  });
+
+  assert.equal(goal?.objective, 'Keep going');
+  assert.deepEqual(calls, [{
+    method: 'thread/goal/set',
+    params: {
+      threadId: 'thread-1',
+      objective: 'Keep going',
+      status: null,
+    },
+  }]);
+  assert.equal(calls.some((call) => call.method === 'turn/interrupt'), false);
+});
+
+test('CodexAppClient follows a hot native goal turn started by thread/goal/set', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const calls: Array<{ method: string; params: any }> = [];
+  const started: any[] = [];
+
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/read') {
+      if (params.includeTurns) {
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'Goal thread',
+            status: { type: 'idle' },
+            turns: [{
+              id: 'goal-turn-1',
+              status: 'completed',
+              items: [{
+                type: 'message',
+                role: 'assistant',
+                phase: 'final',
+                text: 'Goal finished.',
+              }],
+            }],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Goal thread',
+          status: { type: 'idle' },
+          turns: [],
+        },
+      };
+    }
+    if (method === 'thread/goal/set') {
+      setTimeout(() => {
+        client.emit('notification', {
+          method: 'turn/started',
+          params: {
+            threadId: 'thread-1',
+            turn: { id: 'goal-turn-1' },
+          },
+        });
+      }, 0);
+      return {
+        goal: {
+          threadId: params.threadId,
+          objective: params.objective,
+          status: 'active',
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.setThreadGoalAndFollow({
+    threadId: 'thread-1',
+    objective: 'Keep going',
+    timeoutMs: 1000,
+    onTurnStarted: (meta) => {
+      started.push(meta);
+    },
+  });
+
+  assert.equal(result.goal?.objective, 'Keep going');
+  assert.equal(result.turnId, 'goal-turn-1');
+  assert.equal(result.threadStatus, 'idle');
+  assert.equal(result.resumedThread, false);
+  assert.equal(result.turnResult?.outputText, 'Goal finished.');
+  assert.deepEqual(started, [{ threadId: 'thread-1', turnId: 'goal-turn-1' }]);
+  assert.equal(calls.some((call) => call.method === 'thread/resume'), false);
+  assert.equal(calls.some((call) => call.method === 'turn/interrupt'), false);
+});
+
+test('CodexAppClient resumes cold goal threads and follows the resumed native turn', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const calls: Array<{ method: string; params: any }> = [];
+
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/read') {
+      if (params.includeTurns) {
+        return {
+          thread: {
+            id: 'thread-1',
+            name: 'Goal thread',
+            status: { type: 'idle' },
+            turns: [{
+              id: 'goal-turn-cold-1',
+              status: 'completed',
+              items: [{
+                type: 'assistant_message',
+                phase: 'final_answer',
+                text: 'Cold goal finished.',
+              }],
+            }],
+          },
+        };
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Goal thread',
+          status: { type: 'notLoaded' },
+          turns: [],
+        },
+      };
+    }
+    if (method === 'thread/goal/set') {
+      return {
+        goal: {
+          threadId: params.threadId,
+          objective: params.objective,
+          status: 'active',
+        },
+      };
+    }
+    if (method === 'thread/resume') {
+      setTimeout(() => {
+        client.emit('notification', {
+          method: 'turn/started',
+          params: {
+            threadId: 'thread-1',
+            turn: { id: 'goal-turn-cold-1' },
+          },
+        });
+      }, 0);
+      return {
+        thread: {
+          id: params.threadId,
+          status: { type: 'idle' },
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.setThreadGoalAndFollow({
+    threadId: 'thread-1',
+    objective: 'Restart cold thread',
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.turnId, 'goal-turn-cold-1');
+  assert.equal(result.threadStatus, 'notLoaded');
+  assert.equal(result.resumedThread, true);
+  assert.equal(result.turnResult?.outputText, 'Cold goal finished.');
+  assert.equal(calls.some((call) => call.method === 'thread/resume'), true);
+  assert.equal(calls.some((call) => call.method === 'turn/interrupt'), false);
+});
+
+test('CodexAppClient does not follow or resume inactive goal updates', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const calls: Array<{ method: string; params: any }> = [];
+
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          status: { type: 'notLoaded' },
+          turns: [],
+        },
+      };
+    }
+    if (method === 'thread/goal/set') {
+      return {
+        goal: {
+          threadId: params.threadId,
+          objective: 'Keep going',
+          status: 'paused',
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.setThreadGoalAndFollow({
+    threadId: 'thread-1',
+    status: 'paused',
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.goal?.status, 'paused');
+  assert.equal(result.turnId, null);
+  assert.equal(result.turnResult, null);
+  assert.equal(result.resumedThread, false);
+  assert.equal(calls.some((call) => call.method === 'thread/resume'), false);
+  assert.equal(calls.some((call) => call.method === 'turn/interrupt'), false);
+});
+
 test('CodexAppClient lists plugin marketplaces and featured plugin ids', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

@@ -347,6 +347,63 @@ test('WeixinBridgeRuntime does not queue /review behind an existing scope task',
   ]);
 });
 
+test('WeixinBridgeRuntime runs /goal in the background so /allow can approve the active native turn', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const seen: string[] = [];
+  let releaseGoal: () => void = () => {};
+  const goalGate = new Promise<void>((resolve) => {
+    releaseGoal = resolve;
+  });
+  const runtime = makeRuntime({
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any, options: any = {}) {
+        seen.push(event.text);
+        if (event.text.startsWith('/goal')) {
+          await options.onProgress?.({
+            text: 'Native goal started',
+            delta: 'Native goal started',
+            outputKind: 'commentary',
+          });
+          await goalGate;
+          return completeResponse('goal final');
+        }
+        if (event.text === '/allow 1') {
+          return completeResponse('approved once');
+        }
+        return completeResponse('unexpected');
+      },
+    },
+  });
+
+  const goal = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/goal Keep going',
+  });
+  assert.equal(goal?.type, 'scheduled');
+
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const allow = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/allow 1',
+  });
+  assert.equal(allow?.type, undefined);
+
+  releaseGoal();
+  await runtime.waitForIdle();
+
+  assert.deepEqual(seen, ['/goal Keep going', '/allow 1']);
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'approved once' },
+    { externalScopeId: 'wxid_1', content: 'goal final' },
+  ]);
+});
+
 test('WeixinBridgeRuntime merges an image-only inbound message with the next text message into one Codex turn', async () => {
   const seen: Array<{ text: string; attachmentCount: number }> = [];
   const sent: Array<{ externalScopeId: string; content: string }> = [];
@@ -1320,6 +1377,39 @@ test('WeixinBridgeRuntime merges commentary and final-answer progress into the p
   assert.deepEqual(sent, [
     { externalScopeId: 'wxid_1', content: '我先检查一下上下文。' },
     { externalScopeId: 'wxid_1', content: '最终答案第一段。\n\n最终答案第二段。' },
+  ]);
+});
+
+test('WeixinBridgeRuntime delivers streamed progress and final output from a native /goal turn', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(event: any, options: any = {}) {
+        assert.equal(event.text, '/goal Keep working');
+        await options.onProgress?.({
+          text: 'Native goal turn progress.',
+          delta: 'Native goal turn progress.',
+          outputKind: 'commentary',
+        });
+        return completeResponse('Native goal turn final.');
+      },
+    },
+    pollEvents: [{
+      platform: 'weixin',
+      externalScopeId: 'wxid_goal',
+      text: '/goal Keep working',
+    }],
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_goal', content: 'Native goal turn progress.' },
+    { externalScopeId: 'wxid_goal', content: 'Native goal turn final.' },
   ]);
 });
 

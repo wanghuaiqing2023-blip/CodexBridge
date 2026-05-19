@@ -783,7 +783,7 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
     settings: {
       model: 'gpt-5.4',
       reasoning_effort: 'medium',
-      developer_instructions: '',
+      developer_instructions: null,
     },
   });
   assert.deepEqual(turnStart.settings, {
@@ -844,11 +844,57 @@ test('CodexAppClient startTurn omits null collaboration setting strings', async 
   assert.deepEqual(turnStart.collaborationMode, {
     mode: 'default',
     settings: {
-      developer_instructions: '',
+      developer_instructions: null,
     },
   });
   assert.equal('model' in turnStart, false);
   assert.equal('effort' in turnStart, false);
+});
+
+test('CodexAppClient startTurn lets app-server inject built-in plan instructions', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-2' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-2',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    collaborationMode: 'plan',
+    timeoutMs: 10,
+  });
+
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.deepEqual(turnStart.collaborationMode, {
+    mode: 'plan',
+    settings: {
+      developer_instructions: null,
+    },
+  });
 });
 
 test('CodexAppClient startTurn forwards explicit local-image input arrays unchanged', async () => {
@@ -1603,7 +1649,7 @@ test('CodexAppClient omits null reasoning effort from default collaboration sett
     mode: 'default',
     settings: {
       model: 'gpt-5.4',
-      developer_instructions: '',
+      developer_instructions: null,
     },
   });
 });

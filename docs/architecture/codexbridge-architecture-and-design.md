@@ -694,6 +694,8 @@ This document is the top-level architecture baseline. More focused documents:
 
 - [Core architecture](./codexbridge-core-architecture.md)
 - [Concepts and code structures](./codexbridge-concepts-and-code-structures.md)
+- [Foreground/background thread design](./foreground-background-thread-design.md)
+- [Foreground/background thread implementation plan](./foreground-background-thread-implementation-plan.md)
 - [Codex Native API](./codex-native-api.md)
 - [Weixin delivery best practice](./weixin-delivery-best-practice.md)
 - [Mission Control architecture](./mission-control.md)

@@ -2658,12 +2658,14 @@ function formatConfigKeyPath(segments: string[]): string {
     .join('.');
 }
 
-function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions = '' }: any) {
+function serializeCollaborationMode({ collaborationMode, model, effort, developerInstructions }: any) {
   if (!collaborationMode) {
     return null;
   }
   const settings: any = {
-    developer_instructions: developerInstructions,
+    developer_instructions: typeof developerInstructions === 'string' && developerInstructions.length > 0
+      ? developerInstructions
+      : null,
   };
   if (typeof model === 'string' && model.trim()) {
     settings.model = model;

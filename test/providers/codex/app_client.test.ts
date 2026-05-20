@@ -1903,6 +1903,55 @@ test('CodexAppClient waits through transient empty session file errors before re
   assert.equal(readCount, 2);
 });
 
+test('CodexAppClient waits through transient empty rollout read errors before reading turn output', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  let readCount = 0;
+  let startCount = 0;
+  client.request = async (method) => {
+    if (method === 'turn/start') {
+      startCount += 1;
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      readCount += 1;
+      if (readCount === 1) {
+        throw new Error('failed to load thread history for thread thread-1: thread-store internal error: failed to read thread \\\\?\\C:\\Users\\27605\\.codex\\sessions\\rollout-thread-1.jsonl: rollout at \\\\?\\C:\\Users\\27605\\.codex\\sessions\\rollout-thread-1.jsonl is empty');
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'default',
+    timeoutMs: 2500,
+  });
+
+  assert.equal(result.outputText, 'done');
+  assert.equal(readCount, 2);
+  assert.equal(startCount, 1);
+});
+
 test('CodexAppClient retries thread reads that time out while waiting for turn completion', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

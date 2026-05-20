@@ -113,6 +113,17 @@ function makeRuntime({
   });
 }
 
+async function waitForCondition(predicate: () => boolean, { timeoutMs = 1000, intervalMs = 10 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.equal(predicate(), true);
+}
+
 function completeResponse(text: string) {
   return {
     type: 'message',
@@ -547,6 +558,75 @@ test('WeixinBridgeRuntime dispatches plain-text turns in the background so slash
   ]);
 });
 
+test('WeixinBridgeRuntime delivers a running turn after slash commands promote it back to foreground', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let releaseTurn: (value?: unknown) => void = () => {};
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  let firstTurnStarted = false;
+  let isForeground = true;
+
+  const runtime = makeRuntime({
+    previewSoftTargetBytes: 1024,
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any, options: any = {}) {
+        if (event.text === 'first turn') {
+          firstTurnStarted = true;
+          await turnGate;
+          return completeResponse(isForeground ? 'foreground final answer' : 'background terminal notice');
+        }
+        if (event.text === '/new') {
+          isForeground = false;
+          return {
+            type: 'message',
+            messages: [{ text: 'old turn moved to background' }],
+          };
+        }
+        if (event.text === '/open thread-1') {
+          isForeground = true;
+          return {
+            type: 'message',
+            messages: [{ text: 'opened thread-1' }],
+          };
+        }
+        return completeResponse('unexpected');
+      },
+    },
+  });
+
+  const scheduled = await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'first turn',
+  });
+  assert.equal(scheduled.type, 'scheduled');
+  await waitForCondition(() => firstTurnStarted);
+
+  await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/new',
+  });
+  await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/open thread-1',
+  });
+
+  releaseTurn();
+  await runtime.waitForIdle();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'old turn moved to background' },
+    { externalScopeId: 'wxid_1', content: 'opened thread-1' },
+    { externalScopeId: 'wxid_1', content: 'foreground final answer' },
+  ]);
+});
+
 test('WeixinBridgeRuntime swallows a single slash keepalive pulse without replying or forwarding to Codex', async () => {
   const seen: string[] = [];
   const sent: Array<{ externalScopeId: string; content: string }> = [];
@@ -831,6 +911,53 @@ test('WeixinBridgeRuntime defers due automation jobs when the scope is busy', as
   assert.equal(deferredCalls.length, 1);
   assert.equal(deferredCalls[0]?.id, 'auto-2');
   assert.equal(typeof deferredCalls[0]?.nextRunAt, 'number');
+});
+
+test('WeixinBridgeRuntime allows foreground messages while only background work keeps the scope chain busy', async () => {
+  const seen: string[] = [];
+  const sent: string[] = [];
+  let releaseFirst: (() => void) | null = null;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const runtime = makeRuntime({
+    sendText: async ({ content }) => {
+      sent.push(content);
+    },
+    coordinator: {
+      async hasForegroundActiveTurn() {
+        return false;
+      },
+      async handleInboundEvent(event: any) {
+        seen.push(event.text);
+        if (event.text === 'background still running') {
+          await firstGate;
+        }
+        return completeResponse(`done: ${event.text}`);
+      },
+    },
+  });
+
+  const first = runtime.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'background still running',
+  });
+  await waitForCondition(() => seen.includes('background still running'));
+
+  const second = await runtime.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: 'new foreground task',
+  });
+
+  assert.equal(second.messages?.[0]?.text, 'done: new foreground task');
+  assert.deepEqual(seen, ['background still running', 'new foreground task']);
+  assert.deepEqual(sent, ['done: new foreground task']);
+
+  releaseFirst?.();
+  await first;
+  assert.deepEqual(sent, ['done: new foreground task', 'done: background still running']);
 });
 
 test('WeixinBridgeRuntime prefers supervision-backed agent scheduling and does not double-dispatch the same mission', async () => {

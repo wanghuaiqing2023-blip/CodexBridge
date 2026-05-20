@@ -887,24 +887,23 @@ function stripExistingAssistantTimelineLines(content: string): string {
 }
 
 function rewriteAssistantRelativeTimePhrases(text: string, now: number, timezone: string): string {
-  const base = createAssistantWallClockDate(now, timezone);
   let next = String(text ?? '');
   next = next.replace(/(前天|昨天|今天|明天|后天)(?:\s*[（(][^)）]+[)）])?(?:\s*(早上|上午|中午|下午|晚上|今晚))?\s*(\d{1,2})(?:[:：](\d{1,2}))?\s*分?点?/gu, (_full, dayWord, period, hourRaw, minuteRaw) => {
     const dayOffset = relativeDayOffset(dayWord);
     const hour = normalizeHour(Number(hourRaw), `${dayWord}${period ?? ''}`);
     const minute = minuteRaw ? Number(minuteRaw) : 0;
-    return formatAssistantTimestamp(atOffsetDay(base, dayOffset, hour, minute), timezone);
+    return formatAssistantTimestamp(atOffsetDayInTimezone(now, timezone, dayOffset, hour, minute), timezone);
   });
   next = next.replace(/(下周|本周)([一二三四五六日天])(?:\s*(早上|上午|中午|下午|晚上))?\s*(\d{1,2})(?:[:：](\d{1,2}))?\s*分?点?/gu, (_full, rangeWord, weekdayRaw, period, hourRaw, minuteRaw) => {
     const hour = normalizeHour(Number(hourRaw), `${rangeWord}${weekdayRaw}${period ?? ''}`);
     const minute = minuteRaw ? Number(minuteRaw) : 0;
-    return formatAssistantTimestamp(nextWeekly(base, parseChineseWeekday(weekdayRaw), hour, minute, rangeWord === '下周'), timezone);
+    return formatAssistantTimestamp(nextWeeklyInTimezone(now, timezone, parseChineseWeekday(weekdayRaw), hour, minute, rangeWord === '下周'), timezone);
   });
   next = next.replace(/(下周|本周)([一二三四五六日天])/gu, (_full, rangeWord, weekdayRaw) => {
-    return formatAssistantDate(nextWeekly(base, parseChineseWeekday(weekdayRaw), 23, 59, rangeWord === '下周'), timezone);
+    return formatAssistantDate(nextWeeklyInTimezone(now, timezone, parseChineseWeekday(weekdayRaw), 23, 59, rangeWord === '下周'), timezone);
   });
   next = next.replace(/(前天|昨天|今天|明天|后天)(?!\s*\d)/gu, (_full, dayWord) => {
-    return formatAssistantDate(atOffsetDay(base, relativeDayOffset(dayWord), 0, 0), timezone);
+    return formatAssistantDate(atOffsetDayInTimezone(now, timezone, relativeDayOffset(dayWord), 0, 0), timezone);
   });
   return next
     .replace(/((?:UTC)|(?:[A-Za-z]+(?:\/[A-Za-z_+-]+)*))(?!\s)(?=[\p{Script=Han}])/gu, '$1 ')
@@ -961,6 +960,94 @@ function getAssistantDateParts(timestamp: number, timezone: string): {
     minute,
     timeZoneLabel: assistantTimeZoneLabel(resolvedTimezone),
   };
+}
+
+function getAssistantNumericDateParts(timestamp: number, timezone: string): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  weekday: number;
+} {
+  const resolvedTimezone = resolveAssistantTimezone(timezone);
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: resolvedTimezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    weekday: 'short',
+    hour12: false,
+  });
+  const parts = formatter.formatToParts(new Date(timestamp));
+  const readNumber = (type: string, fallback: number) => {
+    const value = Number(parts.find((part) => part.type === type)?.value ?? fallback);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const weekdayRaw = parts.find((part) => part.type === 'weekday')?.value ?? 'Sun';
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekdayRaw);
+  return {
+    year: readNumber('year', 1970),
+    month: readNumber('month', 1),
+    day: readNumber('day', 1),
+    hour: readNumber('hour', 0) % 24,
+    minute: readNumber('minute', 0),
+    weekday: weekday >= 0 ? weekday : 0,
+  };
+}
+
+function timestampForAssistantWallTime(
+  timezone: string,
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+): number {
+  const targetWall = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  let candidate = targetWall;
+  for (let index = 0; index < 3; index += 1) {
+    const actual = getAssistantNumericDateParts(candidate, timezone);
+    const actualWall = Date.UTC(actual.year, actual.month - 1, actual.day, actual.hour, actual.minute, 0, 0);
+    const delta = targetWall - actualWall;
+    if (delta === 0) {
+      break;
+    }
+    candidate += delta;
+  }
+  return candidate;
+}
+
+function atOffsetDayInTimezone(now: number, timezone: string, dayOffset: number, hour: number, minute: number): number {
+  const base = getAssistantNumericDateParts(now, timezone);
+  const target = new Date(Date.UTC(base.year, base.month - 1, base.day + dayOffset, hour, minute, 0, 0));
+  return timestampForAssistantWallTime(
+    timezone,
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    target.getUTCDate(),
+    target.getUTCHours(),
+    target.getUTCMinutes(),
+  );
+}
+
+function nextWeeklyInTimezone(
+  now: number,
+  timezone: string,
+  weekday: number,
+  hour: number,
+  minute: number,
+  forceNextWeek = false,
+): number {
+  const base = getAssistantNumericDateParts(now, timezone);
+  let days = (weekday - base.weekday + 7) % 7;
+  const sameDay = atOffsetDayInTimezone(now, timezone, 0, hour, minute);
+  if (days === 0 && (forceNextWeek || sameDay <= now)) {
+    days = 7;
+  }
+  return atOffsetDayInTimezone(now, timezone, days, hour, minute);
 }
 
 function assistantTimeZoneLabel(timezone: string): string {

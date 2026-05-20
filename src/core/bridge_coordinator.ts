@@ -126,6 +126,7 @@ const THREAD_COMMAND_SKILL_LIST_LIMIT = 100_000;
 const DEFAULT_CODEX_NATIVE_API_HOST = '127.0.0.1';
 const DEFAULT_CODEX_NATIVE_API_PORT = 43182;
 const CODEX_EXPERIMENTAL_PROVIDER_KIND_SET = new Set(['codex', 'openai-native', 'openai-compatible']);
+const BACKGROUND_TARGET_ALIAS_TTL_MS = 30 * 60 * 1000;
 
 export const AGENT_COMMAND_SKILL_ACTIONS = new Set([
   'create_draft',
@@ -935,6 +936,15 @@ export class BridgeCoordinator {
   pendingAutomationDraftsByScope: Map<string, PendingAutomationOperation>;
   pendingAgentDraftsByScope: Map<string, PendingAgentOperation>;
   pendingAssistantUpdateDraftsByScope: Map<string, PendingAssistantRecordUpdateDraft>;
+  backgroundTargetAliasesByScope: Map<string, {
+    generatedAt: number;
+    entries: Array<{
+      alias: string;
+      bridgeSessionId: string | null;
+      threadId: string | null;
+      turnId: string | null;
+    }>;
+  }>;
   localeContext: AsyncLocalStorage<SupportedLocale>;
   i18n: Translator;
 
@@ -998,6 +1008,7 @@ export class BridgeCoordinator {
     this.pendingAutomationDraftsByScope = new Map();
     this.pendingAgentDraftsByScope = new Map();
     this.pendingAssistantUpdateDraftsByScope = new Map();
+    this.backgroundTargetAliasesByScope = new Map();
     this.localeContext = new AsyncLocalStorage();
     this.i18n = createI18n(locale);
   }
@@ -1065,6 +1076,10 @@ export class BridgeCoordinator {
       return '';
     }
     return renderApprovalPromptLines(pendingApprovals, this.currentI18n).join('\n');
+  }
+
+  async hasForegroundActiveTurn(event) {
+    return Boolean(await this.reconcileActiveTurn(toScopeRef(event)));
   }
 
   renderAgentMissionNotification(job: AgentJob, notification: MissionHostNotification): string | null {
@@ -1231,7 +1246,21 @@ export class BridgeCoordinator {
         previewTextPreview: truncateCoordinatorText(result?.previewText, 160),
         outputArtifactCount: Array.isArray(result?.outputArtifacts) ? result.outputArtifacts.length : 0,
       });
-      const response = turnResponse(result, this.currentI18n, buildSessionMeta(nextSession));
+      const completedActive = nextSession?.id
+        ? this.activeTurns?.resolveTurnByBridgeSessionId(nextSession.id) ?? null
+        : null;
+      const foregroundSessionAtCompletion = this.bridgeSessions.resolveScopeSession(scopeRef);
+      const completedWasBackground = completedActive?.visibility === 'background'
+        || localActiveTurn?.visibility === 'background'
+        || (
+          Boolean(nextSession?.id)
+          && Boolean(foregroundSessionAtCompletion)
+          && foregroundSessionAtCompletion?.id !== nextSession.id
+        );
+      const backgroundTerminalState = localActiveTurn?.interruptRequested ? 'interrupted' : 'completed';
+      const response = completedWasBackground
+        ? messageResponse(this.renderBackgroundTerminalLines(nextSession, result, backgroundTerminalState), buildSessionMeta(nextSession))
+        : turnResponse(result, this.currentI18n, buildSessionMeta(nextSession));
       response.meta = {
         ...(response.meta ?? {}),
         codexTurn: {
@@ -1256,7 +1285,21 @@ export class BridgeCoordinator {
       if (!failure) {
         throw error;
       }
-      const response = messageResponse([''], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(effectiveEvent));
+      const failedActive = session?.id
+        ? this.activeTurns?.resolveTurnByBridgeSessionId(session.id) ?? null
+        : null;
+      const foregroundSessionAtFailure = this.bridgeSessions.resolveScopeSession(scopeRef);
+      const failedWasBackground = failedActive?.visibility === 'background'
+        || localActiveTurn?.visibility === 'background'
+        || (
+          Boolean(session?.id)
+          && Boolean(foregroundSessionAtFailure)
+          && foregroundSessionAtFailure?.id !== session.id
+        );
+      const backgroundTerminalState = localActiveTurn?.interruptRequested ? 'interrupted' : 'failed';
+      const response = failedWasBackground
+        ? messageResponse(this.renderBackgroundTerminalLines(session, failure, backgroundTerminalState), buildSessionMeta(session))
+        : messageResponse([''], session ? buildSessionMeta(session) : this.buildScopedSessionMeta(effectiveEvent));
       response.meta = {
         ...(response.meta ?? {}),
         codexTurn: {
@@ -1447,6 +1490,9 @@ export class BridgeCoordinator {
       return messageResponse(lines);
     }
     const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    const backgroundTurns = this.activeTurns?.listBackgroundTurns(scopeRef, session.id) ?? [];
+    const backgroundLines = this.renderBackgroundStatusLines(scopeRef, backgroundTurns);
+    const foregroundLines = this.renderForegroundStatusLines(session, activeTurn);
     const simpleLines = [
       this.t('coordinator.status.interfaceProfile', { id: providerProfile.id }),
       this.t('coordinator.status.threadTitle', {
@@ -1460,6 +1506,8 @@ export class BridgeCoordinator {
       this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
       this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
+      ...foregroundLines,
+      ...backgroundLines,
     ];
     const detailLines = [
       this.t('coordinator.status.scope', { scope: `${event.platform}:${event.externalScopeId}` }),
@@ -1488,6 +1536,7 @@ export class BridgeCoordinator {
       this.t('coordinator.status.currentTurn', { value: formatActiveTurnValue(activeTurn, this.currentI18n) }),
       this.t('coordinator.status.turnState', { value: formatActiveTurnState(activeTurn, this.currentI18n) }),
       ...(activeTurn ? [this.t('coordinator.status.turnControl')] : []),
+      ...backgroundLines,
       ...renderArtifactDeliveryStatusLines(activeTurn?.artifactDelivery ?? lastArtifactDelivery, this.currentI18n),
     ];
     const lines = details
@@ -2063,14 +2112,18 @@ export class BridgeCoordinator {
   }
 
   async handleNewCommand(event, args) {
-    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'new');
-    if (activeResponse) {
-      return activeResponse;
-    }
     const scopeRef = toScopeRef(event);
     const existing = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const active = existing
+      ? this.activeTurns?.resolveTurnByBridgeSessionId(existing.id) ?? this.activeTurns?.resolveScopeTurn(scopeRef) ?? null
+      : this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     const existingSettings = existing ? this.bridgeSessions.getSessionSettings(existing.id) : null;
     const providerProfileId = existing?.providerProfileId ?? this.resolveDefaultProviderProfileId();
+    if (active?.bridgeSessionId) {
+      this.activeTurns?.updateSessionTurn(active.bridgeSessionId, {
+        visibility: 'background',
+      });
+    }
     const nextSession = await this.bridgeSessions.createSessionForScope(scopeRef, {
       providerProfileId,
       cwd: args.join(' ').trim() || existing?.cwd || this.resolveEventCwd(event),
@@ -2082,11 +2135,13 @@ export class BridgeCoordinator {
         trigger: 'new-command',
       },
     });
-    return messageResponse([
+    const lines = [
+      ...(active ? [this.t('coordinator.new.handoff')] : []),
       this.t('coordinator.new.created'),
       this.t('coordinator.status.providerProfile', { id: nextSession.providerProfileId }),
       this.t('coordinator.status.codexThread', { id: nextSession.codexThreadId }),
-    ], buildSessionMeta(nextSession));
+    ];
+    return messageResponse(lines, buildSessionMeta(nextSession));
   }
 
   async handleUploadsCommand(event, args) {
@@ -3287,6 +3342,15 @@ export class BridgeCoordinator {
     if (action === 'cancel') {
       return this.handleThreadsCancelCommand(event);
     }
+    if (action === 'stop') {
+      return this.handleThreadsStopCommand(event, args.slice(1));
+    }
+    if (action === 'allow') {
+      return this.handleThreadsAllowCommand(event, args.slice(1));
+    }
+    if (action === 'open') {
+      return this.handleThreadsOpenCommand(event, args.slice(1));
+    }
     if (action === 'all') {
       return this.renderThreadsHomePage(event, { includeArchived: true, onlyPinned: false });
     }
@@ -3667,6 +3731,100 @@ export class BridgeCoordinator {
     return messageResponse([
       this.t('coordinator.threads.pendingCancelled'),
     ], this.buildScopedSessionMeta(event));
+  }
+
+  async handleThreadsStopCommand(event, args) {
+    const target = String(args[0] ?? '').trim();
+    if (!target) {
+      return messageResponse([this.t('coordinator.threads.stopUsage')], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const resolved = await this.resolveBackgroundTurnTarget(scopeRef, target);
+    if (!resolved) {
+      return messageResponse([this.t('coordinator.threads.backgroundNotFound', { target })], this.buildScopedSessionMeta(event));
+    }
+    const { active, session } = resolved;
+    if (active.visibility === 'foreground') {
+      return messageResponse([this.t('coordinator.threads.stopForegroundHint')], buildSessionMeta(session));
+    }
+    const stopResult = await this.stopThreadForSession(scopeRef, session);
+    if (stopResult.interruptedTurnIds.length === 0 && !stopResult.requestedWhileStarting) {
+      return messageResponse([this.t('coordinator.stop.none')], buildSessionMeta(session));
+    }
+    return messageResponse([
+      this.t('coordinator.stop.requested'),
+    ], buildSessionMeta(session));
+  }
+
+  async handleThreadsOpenCommand(event, args) {
+    const target = String(args[0] ?? '').trim();
+    if (!target) {
+      return messageResponse([
+        this.t('coordinator.open.usage'),
+        this.t('coordinator.open.help'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const backgroundTarget = await this.resolveBackgroundTurnTarget(scopeRef, target);
+    if (backgroundTarget?.session?.codexThreadId) {
+      return this.handleOpenCommand(event, [backgroundTarget.session.codexThreadId]);
+    }
+    return this.handleOpenCommand(event, args);
+  }
+
+  async handleThreadsAllowCommand(event, args) {
+    const target = String(args[0] ?? '').trim();
+    const optionArgs = args.slice(1);
+    if (!target) {
+      return messageResponse([this.t('coordinator.threads.allowUsage')], this.buildScopedSessionMeta(event));
+    }
+    const parsed = parseAllowCommandArgs(optionArgs.length > 0 ? optionArgs : ['1']);
+    if (!parsed.option) {
+      return messageResponse([this.t('coordinator.threads.allowUsage')], this.buildScopedSessionMeta(event));
+    }
+    const scopeRef = toScopeRef(event);
+    const resolved = await this.resolveBackgroundTurnTarget(scopeRef, target);
+    if (!resolved) {
+      return messageResponse([this.t('coordinator.threads.backgroundNotFound', { target })], this.buildScopedSessionMeta(event));
+    }
+    const { active, session } = resolved;
+    if (active.visibility === 'foreground') {
+      return messageResponse([this.t('coordinator.threads.allowForegroundHint')], buildSessionMeta(session));
+    }
+    const pendingApprovals = Array.isArray(active.pendingApprovals) ? active.pendingApprovals : [];
+    if (pendingApprovals.length === 0) {
+      return messageResponse([this.t('coordinator.allow.none')], buildSessionMeta(session));
+    }
+    const request = pendingApprovals[parsed.requestIndex - 1] ?? null;
+    if (!request) {
+      return messageResponse([
+        this.t('coordinator.allow.missingRequest', { index: parsed.requestIndex }),
+      ], buildSessionMeta(session));
+    }
+    const providerProfile = this.requireProviderProfile(active.providerProfileId);
+    const providerPlugin = this.providerRegistry.getProvider(providerProfile.providerKind);
+    if (typeof providerPlugin.respondToApproval !== 'function') {
+      return messageResponse([
+        this.t('coordinator.allow.unsupported', { kind: providerProfile.providerKind }),
+      ], buildSessionMeta(session));
+    }
+    try {
+      await providerPlugin.respondToApproval({
+        providerProfile,
+        request,
+        option: parsed.option,
+      });
+      this.activeTurns?.clearPendingApprovalByBridgeSessionId(session.id, request.requestId);
+      const reconciledActive = await this.reconcileActiveTurnForSession(session.id);
+      return messageResponse(
+        renderAllowAcknowledgementLines(request, parsed.option, this.currentI18n, Boolean(reconciledActive)),
+        buildSessionMeta(session),
+      );
+    } catch (error) {
+      return messageResponse([
+        this.t('coordinator.allow.failed', { error: formatUserError(error) }),
+      ], buildSessionMeta(session));
+    }
   }
 
   async cleanupInternalProviderThreads({
@@ -4240,10 +4398,6 @@ export class BridgeCoordinator {
   }
 
   async handleOpenCommand(event, args) {
-    const activeResponse = await this.rejectIfActiveTurnForCommand(event, 'open');
-    if (activeResponse) {
-      return activeResponse;
-    }
     const requested = args[0]?.trim() ?? '';
     if (!requested) {
       return messageResponse([
@@ -4253,12 +4407,27 @@ export class BridgeCoordinator {
     }
     const scopeRef = toScopeRef(event);
     const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const currentActive = currentSession
+      ? this.activeTurns?.resolveTurnByBridgeSessionId(currentSession.id) ?? null
+      : this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     const currentSettings = currentSession ? this.bridgeSessions.getSessionSettings(currentSession.id) : null;
     const resolvedThread = this.resolveRequestedThread(event, requested);
     if (!resolvedThread.ok) {
       return messageResponse([resolvedThread.message], this.buildScopedSessionMeta(event));
     }
     const providerProfile = this.requireProviderProfile(resolvedThread.providerProfileId);
+    const existingTargetSession = this.bridgeSessions.findSessionByProviderThread(providerProfile.id, resolvedThread.threadId);
+    const targetActive = existingTargetSession
+      ? this.activeTurns?.resolveTurnByBridgeSessionId(existingTargetSession.id) ?? null
+      : null;
+    if (
+      currentActive?.bridgeSessionId
+      && currentActive.bridgeSessionId !== existingTargetSession?.id
+    ) {
+      this.activeTurns?.updateSessionTurn(currentActive.bridgeSessionId, {
+        visibility: 'background',
+      });
+    }
     const session = await this.bridgeSessions.bindScopeToProviderThread(
       scopeRef,
       {
@@ -4275,7 +4444,15 @@ export class BridgeCoordinator {
           }),
       },
     );
+    if (targetActive?.bridgeSessionId) {
+      this.activeTurns?.updateSessionTurn(targetActive.bridgeSessionId, {
+        visibility: 'foreground',
+      });
+    }
     const messages = [
+      ...(currentActive?.bridgeSessionId && currentActive.bridgeSessionId !== session.id
+        ? [this.t('coordinator.open.handoff')]
+        : []),
       this.t('coordinator.open.opened', { threadId: session.codexThreadId }),
       this.t('coordinator.status.providerProfile', { id: providerProfile.id }),
       this.t('coordinator.status.bridgeSession', { id: session.id }),
@@ -10945,9 +11122,19 @@ export class BridgeCoordinator {
 
   async reconcileActiveTurn(scopeRef) {
     const activeTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    return this.reconcileActiveTurnRecord(activeTurn);
+  }
+
+  async reconcileActiveTurnForSession(bridgeSessionId) {
+    const activeTurn = this.activeTurns?.resolveTurnByBridgeSessionId(bridgeSessionId) ?? null;
+    return this.reconcileActiveTurnRecord(activeTurn);
+  }
+
+  async reconcileActiveTurnRecord(activeTurn) {
     if (!activeTurn) {
       return null;
     }
+    const scopeRef = activeTurn.scopeRef;
     if (!activeTurn.providerProfileId || !activeTurn.threadId || !activeTurn.turnId) {
       return activeTurn;
     }
@@ -10965,7 +11152,11 @@ export class BridgeCoordinator {
       const threadTurns = Array.isArray(thread?.turns) ? thread.turns : [];
       const turn = threadTurns.find((entry) => entry.id === activeTurn.turnId) ?? null;
       if (turn && isProviderTurnTerminal(turn.status)) {
-        this.activeTurns?.endScopeTurn(scopeRef);
+        if (activeTurn.bridgeSessionId) {
+          this.activeTurns?.endSessionTurn(activeTurn.bridgeSessionId);
+        } else {
+          this.activeTurns?.endScopeTurn(scopeRef);
+        }
         return null;
       }
       if (!turn) {
@@ -10978,7 +11169,12 @@ export class BridgeCoordinator {
         const reboundTurn = runningTurns.find((entry) => pendingTurnIds.includes(String(entry?.id ?? '').trim()))
           ?? (runningTurns.length === 1 ? runningTurns[0] : null);
         if (reboundTurn?.id) {
-          const updated = this.activeTurns?.updateScopeTurn(scopeRef, {
+          const updated = activeTurn.bridgeSessionId
+            ? this.activeTurns?.updateSessionTurn(activeTurn.bridgeSessionId, {
+              turnId: reboundTurn.id,
+              interruptDispatched: false,
+            }) ?? null
+            : this.activeTurns?.updateScopeTurn(scopeRef, {
             turnId: reboundTurn.id,
             interruptDispatched: false,
           }) ?? null;
@@ -10991,22 +11187,32 @@ export class BridgeCoordinator {
           return updated ?? activeTurn;
         }
         if (runningTurns.length === 0 && !hasPendingApproval(activeTurn)) {
-          this.activeTurns?.endScopeTurn(scopeRef);
+          if (activeTurn.bridgeSessionId) {
+            this.activeTurns?.endSessionTurn(activeTurn.bridgeSessionId);
+          } else {
+            this.activeTurns?.endScopeTurn(scopeRef);
+          }
           return null;
         }
       }
     } catch {
       return activeTurn;
     }
-    return this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    return activeTurn.bridgeSessionId
+      ? this.activeTurns?.resolveTurnByBridgeSessionId(activeTurn.bridgeSessionId) ?? null
+      : this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
   }
 
   async releaseActiveTurnIfStillRunning(scopeRef, { localTurnFinished = false, expectedActiveTurn = null } = {}) {
-    const currentActiveTurn = this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
+    const currentActiveTurn = expectedActiveTurn?.bridgeSessionId
+      ? this.activeTurns?.resolveTurnByBridgeSessionId(expectedActiveTurn.bridgeSessionId) ?? null
+      : this.activeTurns?.resolveScopeTurn(scopeRef) ?? null;
     if (expectedActiveTurn && currentActiveTurn !== expectedActiveTurn) {
       return;
     }
-    const activeTurn = await this.reconcileActiveTurn(scopeRef);
+    const activeTurn = expectedActiveTurn?.bridgeSessionId
+      ? await this.reconcileActiveTurnForSession(expectedActiveTurn.bridgeSessionId)
+      : await this.reconcileActiveTurn(scopeRef);
     if (!activeTurn) {
       return;
     }
@@ -11020,13 +11226,21 @@ export class BridgeCoordinator {
         threadId: activeTurn.threadId ?? null,
         turnId: activeTurn.turnId ?? null,
       });
-      this.activeTurns?.endScopeTurn(scopeRef);
+      if (activeTurn.bridgeSessionId) {
+        this.activeTurns?.endSessionTurn(activeTurn.bridgeSessionId);
+      } else {
+        this.activeTurns?.endScopeTurn(scopeRef);
+      }
       return;
     }
     if (activeTurn.turnId || hasPendingApproval(activeTurn)) {
       return;
     }
-    this.activeTurns?.endScopeTurn(scopeRef);
+    if (activeTurn.bridgeSessionId) {
+      this.activeTurns?.endSessionTurn(activeTurn.bridgeSessionId);
+    } else {
+      this.activeTurns?.endScopeTurn(scopeRef);
+    }
   }
 
   async resolveStatusModelValue(providerProfile, settings) {
@@ -11106,6 +11320,135 @@ export class BridgeCoordinator {
         ? this.t('coordinator.blocked.interruptRequested')
         : this.t('coordinator.blocked.waitOrStop'),
     ], buildActiveTurnMeta(activeTurn) ?? this.buildScopedSessionMeta(event));
+  }
+
+  renderBackgroundTerminalLines(session, result, state = 'completed') {
+    const threadLabel = formatCurrentBindingTitle(session?.title, session?.codexThreadId, this.currentI18n);
+    const summarySource = result?.outputText || result?.previewText || result?.errorMessage || '';
+    const summary = compactWhitespace(summarySource).slice(0, 500);
+    const titleKey = state === 'failed'
+      ? 'coordinator.background.failed'
+      : state === 'interrupted'
+        ? 'coordinator.background.interrupted'
+        : 'coordinator.background.completed';
+    const lines = [
+      this.t(titleKey),
+      this.t('coordinator.background.thread', { value: threadLabel }),
+    ];
+    if (state === 'failed') {
+      lines.push(this.t('coordinator.background.reason', { value: summary || this.t('common.unknown') }));
+    } else if (state === 'completed' && summary) {
+      lines.push(this.t('coordinator.background.summary', { value: summary }));
+    }
+    lines.push(this.t('coordinator.background.view', { target: session?.codexThreadId || session?.id || '' }));
+    return lines;
+  }
+
+  renderBackgroundStatusLines(scopeRef, backgroundTurns = []) {
+    const turns = Array.isArray(backgroundTurns) ? backgroundTurns : [];
+    const aliasEntries = this.refreshBackgroundTargetAliases(scopeRef, turns);
+    const lines = [
+      this.t('coordinator.background.statusTitle', { count: turns.length }),
+    ];
+    for (const [index, turn] of turns.entries()) {
+      const session = turn.bridgeSessionId ? this.bridgeSessions.getSessionById(turn.bridgeSessionId) : null;
+      const alias = aliasEntries[index]?.alias ?? `B${index + 1}`;
+      const target = alias;
+      const label = formatCurrentBindingTitle(session?.title, turn.threadId ?? session?.codexThreadId, this.currentI18n);
+      const state = hasPendingApproval(turn) ? 'waiting approval' : 'running';
+      lines.push(`${alias}. [${state}] ${label}`);
+      lines.push(`   thread: ${turn.threadId ?? session?.codexThreadId ?? ''}`);
+      if (hasPendingApproval(turn)) {
+        lines.push(`   allow: /threads allow ${target}`);
+      }
+      lines.push(`   stop: /threads stop ${target}`);
+      lines.push(`   open: /threads open ${target}`);
+    }
+    return lines;
+  }
+
+  refreshBackgroundTargetAliases(scopeRef, backgroundTurns = []) {
+    const scopeKey = formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+    const entries = (Array.isArray(backgroundTurns) ? backgroundTurns : []).map((turn, index) => ({
+      alias: `B${index + 1}`,
+      bridgeSessionId: turn.bridgeSessionId ?? null,
+      threadId: turn.threadId ?? null,
+      turnId: turn.turnId ?? null,
+    }));
+    this.backgroundTargetAliasesByScope.set(scopeKey, {
+      generatedAt: this.now(),
+      entries,
+    });
+    return entries;
+  }
+
+  renderForegroundStatusLines(session, activeTurn) {
+    const label = formatCurrentBindingTitle(session?.title, session?.codexThreadId, this.currentI18n);
+    const state = formatActiveTurnState(activeTurn, this.currentI18n);
+    const lines = [
+      this.t('coordinator.foreground.thread', { value: label }),
+      this.t('coordinator.foreground.status', { value: state }),
+    ];
+    if (activeTurn) {
+      lines.push(this.t('coordinator.foreground.control'));
+    }
+    return lines;
+  }
+
+  async resolveBackgroundTurnTarget(scopeRef, target) {
+    const rawTarget = String(target ?? '').trim();
+    const normalized = rawTarget.toLowerCase();
+    if (!rawTarget) {
+      return null;
+    }
+    const foreground = this.bridgeSessions.resolveScopeSession(scopeRef);
+    const candidates = this.activeTurns?.listScopeTurns(scopeRef) ?? [];
+    const alias = /^b[1-9]\d*$/i.test(rawTarget) ? rawTarget.toUpperCase() : null;
+    if (alias) {
+      const scopeKey = formatPlatformScopeKey(scopeRef.platform, scopeRef.externalScopeId);
+      const snapshot = this.backgroundTargetAliasesByScope.get(scopeKey) ?? null;
+      if (!snapshot || this.now() - snapshot.generatedAt > BACKGROUND_TARGET_ALIAS_TTL_MS) {
+        return null;
+      }
+      const entry = snapshot.entries.find((candidate) => candidate.alias === alias) ?? null;
+      if (!entry) {
+        return null;
+      }
+      for (const active of candidates) {
+        const session = active.bridgeSessionId ? this.bridgeSessions.getSessionById(active.bridgeSessionId) : null;
+        const sameSession = entry.bridgeSessionId && active.bridgeSessionId === entry.bridgeSessionId;
+        const sameThread = entry.threadId && (active.threadId === entry.threadId || session?.codexThreadId === entry.threadId);
+        const sameTurn = !entry.turnId || active.turnId === entry.turnId;
+        if ((sameSession || sameThread) && sameTurn) {
+          return {
+            active,
+            session: session ?? foreground,
+          };
+        }
+      }
+      return null;
+    }
+    for (const active of candidates) {
+      const session = active.bridgeSessionId ? this.bridgeSessions.getSessionById(active.bridgeSessionId) : null;
+      const ids = [
+        active.bridgeSessionId,
+        active.threadId,
+        session?.codexThreadId,
+      ]
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean);
+      if (!ids.some((id) => id === normalized)) {
+        continue;
+      }
+      if (!session && active.bridgeSessionId) {
+        return null;
+      }
+      return {
+        active,
+        session: session ?? foreground,
+      };
+    }
+    return null;
   }
 
   async rejectIfActiveTurnForCommand(event, commandName = 'generic') {
@@ -11305,7 +11648,7 @@ export class BridgeCoordinator {
   async waitForThreadToStop(scopeRef, session, waitForSettleMs = 10_000) {
     const deadline = this.now() + Math.max(0, waitForSettleMs);
     while (this.now() < deadline) {
-      const active = await this.reconcileActiveTurn(scopeRef);
+      const active = await this.reconcileActiveTurnForSession(session.id);
       let runningTurns = [];
       try {
         const snapshot = await this.readThreadForSession(session);
@@ -11322,7 +11665,7 @@ export class BridgeCoordinator {
       }
       await sleep(250);
     }
-    return (await this.reconcileActiveTurn(scopeRef)) === null;
+    return (await this.reconcileActiveTurnForSession(session.id)) === null;
   }
 
   async stopThreadForSession(
@@ -11334,14 +11677,14 @@ export class BridgeCoordinator {
       waitForSettleMs?: number;
     } = {},
   ) {
-    const active = await this.reconcileActiveTurn(scopeRef);
+    const active = await this.reconcileActiveTurnForSession(session.id);
     const pendingApprovalCount = Array.isArray(active?.pendingApprovals) ? active.pendingApprovals.length : 0;
     const requestedWhileStarting = Boolean(active && !active.turnId);
     if (active && !active.interruptRequested) {
-      this.activeTurns?.requestInterrupt(scopeRef);
+      this.activeTurns?.requestInterruptByBridgeSessionId(session.id);
     }
     if (pendingApprovalCount > 0) {
-      this.activeTurns?.clearPendingApprovals(scopeRef);
+      this.activeTurns?.clearPendingApprovalsByBridgeSessionId(session.id);
     }
 
     let providerProfile = null;
@@ -11375,7 +11718,7 @@ export class BridgeCoordinator {
       } else {
         for (const turnId of interruptedTurnIds) {
           if (active?.turnId === turnId) {
-            this.activeTurns?.noteInterruptDispatched(scopeRef, true);
+            this.activeTurns?.noteInterruptDispatchedByBridgeSessionId(session.id, true);
           }
           try {
             await providerPlugin.interruptTurn({
@@ -11385,7 +11728,7 @@ export class BridgeCoordinator {
             });
           } catch (error) {
             if (active?.turnId === turnId) {
-              this.activeTurns?.noteInterruptDispatched(scopeRef, false);
+              this.activeTurns?.noteInterruptDispatchedByBridgeSessionId(session.id, false);
             }
             interruptErrors.push(formatUserError(error));
           }
@@ -11404,7 +11747,15 @@ export class BridgeCoordinator {
         turnId: active.turnId ?? null,
         interruptErrors,
       });
-      this.activeTurns?.endScopeTurn(scopeRef);
+      this.activeTurns?.endSessionTurn(session.id);
+    }
+    if (
+      active
+      && active.visibility === 'background'
+      && interruptedTurnIds.length > 0
+      && interruptErrors.length === 0
+    ) {
+      this.activeTurns?.endSessionTurn(session.id);
     }
 
     const settled = waitForSettleMs > 0
@@ -11510,7 +11861,20 @@ export class BridgeCoordinator {
       sessionSettings,
       event: turnEvent,
       inputText: event.text,
-      onProgress: options.onProgress ?? null,
+      onProgress: async (update) => {
+        const active = this.activeTurns?.resolveTurnByBridgeSessionId(session.id) ?? null;
+        const foregroundSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+        if (
+          active?.visibility === 'background'
+          || (foregroundSession && foregroundSession.id !== session.id)
+          || (!active && foregroundSession?.id !== session.id)
+        ) {
+          return;
+        }
+        if (typeof options.onProgress === 'function') {
+          await options.onProgress(update);
+        }
+      },
       onTurnStarted: async (meta: { turnId?: string | null; threadId?: string | null } = {}) => {
         debugCoordinator('turn_started', {
           platform: scopeRef.platform,
@@ -11523,7 +11887,7 @@ export class BridgeCoordinator {
         if (turnArtifactContext) {
           turnArtifactContext.turnId = meta.turnId ?? null;
         }
-        const active = this.activeTurns?.updateScopeTurn(scopeRef, {
+        const active = this.activeTurns?.updateSessionTurn(session.id, {
           bridgeSessionId: session.id,
           providerProfileId: session.providerProfileId,
           threadId: meta.threadId ?? session.codexThreadId,
@@ -11548,7 +11912,7 @@ export class BridgeCoordinator {
         }
       },
       onApprovalRequest: async (request: ProviderApprovalRequest) => {
-        this.activeTurns?.addPendingApproval(scopeRef, request);
+        this.activeTurns?.addPendingApprovalByBridgeSessionId(session.id, request);
         if (typeof options.onApprovalRequest === 'function') {
           await options.onApprovalRequest(request);
         }
@@ -11586,7 +11950,7 @@ export class BridgeCoordinator {
       outputArtifactCount: Array.isArray(finalizedResult?.outputArtifacts) ? finalizedResult.outputArtifacts.length : 0,
       artifactDelivery: finalizedResult?.artifactDelivery ?? null,
     });
-    this.activeTurns?.updateScopeTurn(scopeRef, {
+    this.activeTurns?.updateSessionTurn(session.id, {
       artifactDelivery: finalizedResult.artifactDelivery ?? pendingArtifactDelivery ?? null,
     });
     const nextSession = this.bridgeSessions.updateSession(session.id, {
@@ -11622,7 +11986,11 @@ export class BridgeCoordinator {
     if (typeof providerPlugin.interruptTurn !== 'function') {
       throw new Error(this.t('coordinator.turn.providerNoInterrupt', { kind: providerProfile.providerKind }));
     }
-    this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, true);
+    if (activeTurn.bridgeSessionId) {
+      this.activeTurns?.noteInterruptDispatchedByBridgeSessionId(activeTurn.bridgeSessionId, true);
+    } else {
+      this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, true);
+    }
     try {
       await providerPlugin.interruptTurn({
         providerProfile,
@@ -11630,7 +11998,11 @@ export class BridgeCoordinator {
         turnId: activeTurn.turnId,
       });
     } catch (error) {
-      this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, false);
+      if (activeTurn.bridgeSessionId) {
+        this.activeTurns?.noteInterruptDispatchedByBridgeSessionId(activeTurn.bridgeSessionId, false);
+      } else {
+        this.activeTurns?.noteInterruptDispatched(activeTurn.scopeRef, false);
+      }
       throw error;
     }
   }
@@ -16926,6 +17298,11 @@ function formatCurrentBindingTitle(title, threadId, i18n: Translator) {
   return i18n.t('coordinator.thread.untitled');
 }
 
+function shortThreadIdForDisplay(threadId) {
+  const normalized = normalizeCwd(threadId);
+  return normalized ? normalized.slice(0, 8) : '';
+}
+
 function renderThreadPeek(thread, i18n: Translator) {
   const turns = extractRecentThreadTurns(thread.turns);
   const lines = [
@@ -20597,6 +20974,8 @@ function isResumeRetryableError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /failed to load rollout/i.test(message)
     || /empty session file/i.test(message)
+    || /failed to read thread .* is empty/i.test(message)
+    || /rollout .* is empty/i.test(message)
     || /no rollout found/i.test(message);
 }
 

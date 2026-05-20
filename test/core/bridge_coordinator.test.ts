@@ -815,6 +815,21 @@ function createMissionControlDraftRepo() {
   return repoRoot;
 }
 
+function removeTempDir(pathname: string) {
+  try {
+    fs.rmSync(pathname, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  } catch (error: any) {
+    if (error?.code !== 'EPERM') {
+      throw error;
+    }
+  }
+}
+
 async function maybeReturnArtifactIntentParserResult({
   bridgeSession: _bridgeSession,
   onTurnStarted: _onTurnStarted,
@@ -1603,6 +1618,36 @@ test('bridge coordinator recreates a scope session when Codex reports a damaged 
   });
 
   assert.match(result.messages[0]?.text ?? '', /openai: hello after rollout damage/);
+  assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
+  assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
+  assert.equal(openai.startThreadCalls.length, 1);
+});
+
+test('bridge coordinator retries when Codex reports a newly created rollout is empty', async () => {
+  const { runtime, openai } = makeRuntime();
+  const original = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-empty-rollout',
+    text: '/new',
+  });
+
+  let injected = false;
+  const originalStartTurn = openai.startTurn.bind(openai);
+  openai.startTurn = async (args) => {
+    if (!injected && args.bridgeSession.codexThreadId === original.session?.codexThreadId) {
+      injected = true;
+      throw new Error(`failed to load thread history for thread ${original.session.codexThreadId}: thread-store internal error: failed to read thread \\\\?\\C:\\Users\\27605\\.codex\\sessions\\rollout-${original.session.codexThreadId}.jsonl: rollout at \\\\?\\C:\\Users\\27605\\.codex\\sessions\\rollout-${original.session.codexThreadId}.jsonl is empty`);
+    }
+    return originalStartTurn(args);
+  };
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-empty-rollout',
+    text: 'current thread cwd?',
+  });
+
+  assert.match(result.messages[0]?.text ?? '', /openai: current thread cwd\?/);
   assert.equal(result.session?.codexThreadId, original.session?.codexThreadId);
   assert.equal(result.session?.bridgeSessionId, original.session?.bridgeSessionId);
   assert.equal(openai.startThreadCalls.length, 1);
@@ -3230,6 +3275,9 @@ test('/as uses Codex classification for required same-day work instead of local 
       platform: 'weixin',
       externalScopeId: 'wx-user-assistant-work-todo-1',
       text: '/as 今天要做停机坪的一个测算，包括成本和报价测算。这项工作今天必须做完，请把它提成一个比较高的优先级，给我列出来。',
+      metadata: {
+        timezone: 'Etc/UTC',
+      },
     });
 
     const savedText = saved.messages.map((message) => message.text ?? '').join('\n');
@@ -3294,6 +3342,9 @@ test('/as edit modifies the pending assistant record instead of replacing it', a
     platform: 'weixin',
     externalScopeId: 'wx-user-assistant-edit-1',
     text: '/as 明天上午10点提醒我给王总回电话 #客户',
+    metadata: {
+      timezone: 'Etc/UTC',
+    },
   });
   const before = runtime.repositories.assistantRecords.list()[0];
   assert.equal(before?.type, 'reminder');
@@ -3303,6 +3354,9 @@ test('/as edit modifies the pending assistant record instead of replacing it', a
     platform: 'weixin',
     externalScopeId: 'wx-user-assistant-edit-1',
     text: '/as edit 把王总改成李总，时间改成明天上午11点，加 #重要客户',
+    metadata: {
+      timezone: 'Etc/UTC',
+    },
   });
 
   const editedText = edited.messages.map((message) => message.text ?? '').join('\n');
@@ -3313,7 +3367,7 @@ test('/as edit modifies the pending assistant record instead of replacing it', a
   assert.equal(after?.id, before?.id);
   assert.equal(after?.type, 'reminder');
   assert.equal(after?.status, 'pending');
-  assert.match(after?.content ?? '', /提醒时间：\d{4}-\d{2}-\d{2} 11:00 UTC/);
+  assert.match(after?.content ?? '', /(?:03:00 UTC|11:00 Asia\/Shanghai)/);
   assert.match(after?.content ?? '', /李总/);
   assert.doesNotMatch(after?.content ?? '', /王总/);
   assert.doesNotMatch(after?.content ?? '', /明天上午11点/);
@@ -3978,6 +4032,9 @@ test('/as uses Codex rewrite to merge natural-language edits into the matched as
       platform: 'weixin',
       externalScopeId: scopeId,
       text: '/todo 阿尼比莱克鲁第二期账单发票下午要做。做好以后，第二张单也安排在下午处理。',
+      metadata: {
+        timezone: 'Etc/UTC',
+      },
     });
     const before = runtime.repositories.assistantRecords.list()[0];
     assert.match(before?.content ?? '', /第二张单/);
@@ -3994,6 +4051,9 @@ test('/as uses Codex rewrite to merge natural-language edits into the matched as
         '',
         '这个东西要记一下。',
       ].join('\n'),
+      metadata: {
+        timezone: 'Etc/UTC',
+      },
     });
 
     const draftText = draft.messages.map((message) => message.text ?? '').join('\n');
@@ -6242,8 +6302,6 @@ test('bridge coordinator shows command-specific blocked messages while a turn is
   await waitForCondition(() => runtime.services.activeTurns.resolveScopeTurn(scopeRef));
 
   const checks = [
-    ['/new', '当前有回复在进行中，暂时不能新建会话。请先等待，或使用 /stop 中断。'],
-    ['/open thread-1', '当前有回复在进行中，暂时不能切换线程。请先等待，或使用 /stop 中断。'],
     ['/rename thread-1 新名字', '当前有回复在进行中，暂时不能重命名线程。请先等待，或使用 /stop 中断。'],
     ['/provider compat-default', '当前有回复在进行中，暂时不能切换 provider。请先等待，或使用 /stop 中断。'],
     ['/model gpt-5.4', '当前有回复在进行中，暂时不能切换模型。请先等待，或使用 /stop 中断。'],
@@ -6402,6 +6460,267 @@ test('/new creates a fresh session on the current provider profile', async () =>
     runtime.services.bridgeSessions.getSessionSettings(rebound.id)?.collaborationMode,
     'plan',
   );
+});
+
+
+test('/new hands off a running foreground turn to background', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = {
+    platform: 'weixin',
+    externalScopeId: 'wx-handoff-new',
+  };
+  let releaseTurn: (value?: unknown) => void = () => {};
+  const turnGate = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = bridgeSession.codexThreadId + '-turn-1';
+    await onTurnStarted?.({
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+    });
+    await turnGate;
+    return {
+      outputText: 'done: ' + inputText,
+      outputState: 'complete',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'first turn',
+  });
+  await waitForCondition(() => {
+    const session = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+    return session
+      ? runtime.services.activeTurns.resolveTurnByBridgeSessionId(session.id)?.turnId
+      : null;
+  });
+
+  const oldSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(oldSession);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id)?.visibility, 'foreground');
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/new',
+  });
+  const newSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(newSession);
+  assert.notEqual(newSession.id, oldSession.id);
+  assert.match(result.messages.map((message) => message.text ?? '').join('\n'), /后台|background/i);
+
+  const oldActive = runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id);
+  assert.equal(oldActive?.visibility, 'background');
+  assert.equal(runtime.services.activeTurns.resolveScopeTurn(scopeRef), null);
+
+  releaseTurn();
+  const final = await firstTurn;
+  assert.match(final.messages.map((message) => message.text ?? '').join('\n'), /后台|background/i);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id), null);
+});
+
+
+test('/threads open promotes a background running thread to foreground', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-handoff-open' };
+  let releaseTurn: (value?: unknown) => void = () => {};
+  const turnGate = new Promise((resolve) => { releaseTurn = resolve; });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = bridgeSession.codexThreadId + '-turn-1';
+    await onTurnStarted?.({ turnId, threadId: bridgeSession.codexThreadId });
+    await turnGate;
+    return { outputText: 'done: ' + inputText, outputState: 'complete', turnId, threadId: bridgeSession.codexThreadId, title: bridgeSession.title };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'first turn' });
+  await waitForCondition(() => {
+    const session = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+    return session
+      ? runtime.services.activeTurns.resolveTurnByBridgeSessionId(session.id)?.turnId
+      : null;
+  });
+  const oldSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(oldSession);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id)?.visibility, 'background');
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/status' });
+  assert.match(status.messages.map((message) => message.text ?? '').join('\n'), /B1/);
+
+  const opened = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: '/threads open B1',
+  });
+  const rebound = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.equal(rebound?.id, oldSession.id);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id)?.bridgeSessionId, oldSession.id);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id)?.visibility, 'foreground');
+  assert.match(opened.messages.map((message) => message.text ?? '').join('\n'), new RegExp(oldSession.codexThreadId));
+
+  releaseTurn();
+  const final = await firstTurn;
+  assert.match(final.messages.map((message) => message.text ?? '').join('\n'), /done: first turn/);
+  assert.doesNotMatch(final.messages.map((message) => message.text ?? '').join('\n'), /后台|background/i);
+});
+
+test('/open demotes the previous running foreground turn before its final arrives', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-open-demotes-running' };
+  let releaseTurn: (value?: unknown) => void = () => {};
+  const turnGate = new Promise((resolve) => { releaseTurn = resolve; });
+
+  const targetThread = await openai.startThread({
+    providerProfile: { id: 'openai-default', displayName: 'OpenAI Default' },
+    cwd: 'C:\\work\\target',
+    title: 'target thread',
+    metadata: null,
+  });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = bridgeSession.codexThreadId + '-turn-1';
+    await onTurnStarted?.({ turnId, threadId: bridgeSession.codexThreadId });
+    await turnGate;
+    return {
+      outputText: 'old foreground final: ' + inputText,
+      outputState: 'complete',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: 'long foreground task',
+  });
+  await waitForCondition(() => {
+    const session = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+    return session
+      ? runtime.services.activeTurns.resolveTurnByBridgeSessionId(session.id)?.turnId
+      : null;
+  });
+  const oldSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(oldSession);
+
+  const opened = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: `/open ${targetThread.threadId}`,
+  });
+  const openedText = opened.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(openedText, new RegExp(targetThread.threadId));
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.codexThreadId, targetThread.threadId);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.id)?.visibility, 'background');
+
+  releaseTurn();
+  const final = await firstTurn;
+  const finalText = final.messages.map((message) => message.text ?? '').join('\n');
+  assert.match(finalText, /后台|background/i);
+  assert.match(finalText, /查看|open/i);
+  assert.notEqual(finalText.trim(), 'old foreground final: long foreground task');
+});
+
+test('/threads stop interrupts a background running thread', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-background-stop' };
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const oldSession = initial.session;
+  assert.ok(oldSession);
+  const turnId = oldSession.codexThreadId + '-background-turn-1';
+  const thread = openai.threads.get(oldSession.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [{ id: turnId, status: 'running', error: null, items: [] }];
+  runtime.services.activeTurns.beginSessionTurn(scopeRef, oldSession.bridgeSessionId, {
+    providerProfileId: oldSession.providerProfileId,
+    threadId: oldSession.codexThreadId,
+    turnId,
+    visibility: 'background',
+  });
+  openai.interruptTurn = async (params) => {
+    openai.interruptTurnCalls.push(params);
+    const interruptedThread = openai.threads.get(params.threadId);
+    if (interruptedThread) {
+      interruptedThread.turns = [{ id: params.turnId, status: 'interrupted', error: 'Conversation interrupted', items: [] }];
+    }
+  };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/status' });
+  assert.match(status.messages.map((message) => message.text ?? '').join('\n'), /B1/);
+  const stopped = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/threads stop B1' });
+
+  assert.equal(openai.interruptTurnCalls.length, 1);
+  assert.equal(openai.interruptTurnCalls[0]?.turnId, turnId);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.bridgeSessionId), null);
+  assert.match(stopped.messages.map((message) => message.text ?? '').join('\n'), /中断|interrupt/i);
+});
+
+test('/threads stop rejects thread id prefixes and requires status aliases or exact ids', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-background-stop-prefix' };
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const oldSession = initial.session;
+  assert.ok(oldSession);
+  const turnId = oldSession.codexThreadId + '-background-turn-1';
+  const thread = openai.threads.get(oldSession.codexThreadId);
+  assert.ok(thread);
+  thread.turns = [{ id: turnId, status: 'running', error: null, items: [] }];
+  runtime.services.activeTurns.beginSessionTurn(scopeRef, oldSession.bridgeSessionId, {
+    providerProfileId: oldSession.providerProfileId,
+    threadId: oldSession.codexThreadId,
+    turnId,
+    visibility: 'background',
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/status' });
+  assert.match(status.messages.map((message) => message.text ?? '').join('\n'), /B1/);
+  const prefix = oldSession.codexThreadId.slice(0, -1);
+  assert.notEqual(prefix, oldSession.codexThreadId);
+
+  const rejected = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: `/threads stop ${prefix}`,
+  });
+
+  assert.equal(openai.interruptTurnCalls.length, 0);
+  assert.ok(runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.bridgeSessionId));
+  assert.match(rejected.messages.map((message) => message.text ?? '').join('\n'), /B1|B2|status|threadId/i);
+});
+
+test('/threads allow approves a background pending approval', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-background-allow' };
+  const initial = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const oldSession = initial.session;
+  assert.ok(oldSession);
+  const turnId = oldSession.codexThreadId + '-background-approval-1';
+  runtime.services.activeTurns.beginSessionTurn(scopeRef, oldSession.bridgeSessionId, {
+    providerProfileId: oldSession.providerProfileId,
+    threadId: oldSession.codexThreadId,
+    turnId,
+    visibility: 'background',
+  });
+  runtime.services.activeTurns.addPendingApprovalByBridgeSessionId(oldSession.bridgeSessionId, {
+    requestId: 'background-approval-1', kind: 'command', threadId: oldSession.codexThreadId, turnId, itemId: 'item-background-1', reason: 'command failed; retry without sandbox?', command: 'npm run build', cwd: '/home/ubuntu/dev/CodexBridge', availableDecisionKeys: ['accept', 'acceptForSession', 'decline'],
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/status' });
+  assert.match(status.messages.map((message) => message.text ?? '').join('\n'), /B1/);
+  const allowed = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/threads allow B1 2' });
+
+  assert.equal(openai.respondToApprovalCalls.length, 1);
+  assert.equal(openai.respondToApprovalCalls[0]?.option, 2);
+  assert.equal(openai.respondToApprovalCalls[0]?.request?.requestId, 'background-approval-1');
+  const active = runtime.services.activeTurns.resolveTurnByBridgeSessionId(oldSession.bridgeSessionId);
+  assert.equal(active ? active.pendingApprovals.length : 0, 0);
+  assert.match(allowed.messages.map((message) => message.text ?? '').join('\n'), /批准|approval|approved/i);
 });
 
 test('/provider switches the scope to a new provider-backed session', async () => {
@@ -8319,7 +8638,7 @@ test('/agent explicit list stays deterministic and does not invoke the command s
   }
 });
 
-test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware code scaffold', async () => {
+test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware code scaffold', async () => withEnvOverride('CODEXBRIDGE_ENABLE_AGENT_COMMAND', '1', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const repoRoot = createMissionControlDraftRepo();
@@ -8416,16 +8735,16 @@ test('/agent add create-flow replaces generic lifecycle drafts with a repo-aware
     assert.match(pending?.immutablePrompt ?? '', /Formal checklist|已确认待办清单/);
     assert.match(pending?.immutablePrompt ?? '', /Mission title:|任务标题：/);
   } finally {
-    fs.rmSync(repoRoot, { recursive: true, force: true });
+    removeTempDir(repoRoot);
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
     } else {
       process.env.OPENAI_API_KEY = originalOpenAiKey;
     }
   }
-});
+}));
 
-test('/agent broad mission-control goals clarify before creating a draft', async () => {
+test('/agent broad mission-control goals clarify before creating a draft', async () => withEnvOverride('CODEXBRIDGE_ENABLE_AGENT_COMMAND', '1', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_API_KEY;
   const repoRoot = createMissionControlDraftRepo();
@@ -8467,14 +8786,14 @@ test('/agent broad mission-control goals clarify before creating a draft', async
       externalScopeId: 'wx-agent-broad-scope-1',
     }), null);
   } finally {
-    fs.rmSync(repoRoot, { recursive: true, force: true });
+    removeTempDir(repoRoot);
     if (originalOpenAiKey === undefined) {
       delete process.env.OPENAI_API_KEY;
     } else {
       process.env.OPENAI_API_KEY = originalOpenAiKey;
     }
   }
-});
+}));
 
 test('/agent natural language falls back to the bound provider planner after one unparseable command skill result', async () => {
   const originalOpenAiKey = process.env.OPENAI_API_KEY;
@@ -10394,14 +10713,14 @@ test('/plugins shows featured plugins, category summaries, category items, and p
   });
   const categoryText = categories.messages.map((message) => message.text ?? '').join('\n');
   assert.match(categoryText, /插件种类/u);
-  assert.match(categoryText, /1\. App \/ Connector \| 1/u);
-  assert.match(categoryText, /2\. MCP 服务 \| 1/u);
-  assert.match(categoryText, /3\. 混合型 \| 1/u);
+  assert.match(categoryText, /1\. 混合型 \| 1/u);
+  assert.match(categoryText, /2\. App \/ Connector \| 1/u);
+  assert.match(categoryText, /3\. MCP 服务 \| 1/u);
 
   const categoryItems = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-plugins-1',
-    text: '/pg list 1',
+    text: '/pg list 2',
   });
   const categoryItemsText = categoryItems.messages.map((message) => message.text ?? '').join('\n');
   assert.match(categoryItemsText, /插件列表/u);

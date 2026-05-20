@@ -61,6 +61,7 @@ interface BridgeCoordinatorLike {
       onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void>) | null;
     },
   ): Promise<RuntimeResponse>;
+  hasForegroundActiveTurn?(event: InboundTextEvent): Promise<boolean> | boolean;
   renderApprovalPrompt?(event: InboundTextEvent): Promise<string | null> | string | null;
   restartBridge?(params: { event: InboundTextEvent }): Promise<void>;
   runAgentJob?(
@@ -362,7 +363,7 @@ export class WeixinBridgeRuntime {
     };
   }
 
-  scheduleInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
+  async scheduleInboundEvent(event: InboundTextEvent): Promise<RuntimeResponse> {
     const scopeId = String(event?.externalScopeId ?? '');
     if (!scopeId) {
       return this.processInboundEvent(event);
@@ -393,6 +394,15 @@ export class WeixinBridgeRuntime {
     }
 
     if (this.scopeChains.has(scopeId)) {
+      const foregroundBusy = await this.isForegroundScopeBusy(event);
+      if (!foregroundBusy) {
+        debugRuntime('scope_busy_bypassed_for_background', {
+          scopeId,
+          textPreview: truncateDebugText(event?.text),
+          attachmentCount: Array.isArray(event?.attachments) ? event.attachments.length : 0,
+        });
+        return this.processInboundEvent(event);
+      }
       debugRuntime('scope_busy_rejected', {
         scopeId,
         textPreview: truncateDebugText(event?.text),
@@ -413,6 +423,21 @@ export class WeixinBridgeRuntime {
     }
 
     return this.enqueueScopeWork(scopeId, async () => this.processInboundEvent(event));
+  }
+
+  async isForegroundScopeBusy(event: InboundTextEvent): Promise<boolean> {
+    if (typeof this.bridgeCoordinator.hasForegroundActiveTurn !== 'function') {
+      return true;
+    }
+    try {
+      return Boolean(await this.bridgeCoordinator.hasForegroundActiveTurn(event));
+    } catch (error) {
+      debugRuntime('scope_busy_probe_failed', {
+        scopeId: event.externalScopeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return true;
+    }
   }
 
   async respondWhileScopeBusy(event: InboundTextEvent): Promise<RuntimeResponse> {

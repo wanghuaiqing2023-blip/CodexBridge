@@ -2662,8 +2662,9 @@ function serializeCollaborationMode({ collaborationMode, model, effort, develope
   if (!collaborationMode) {
     return null;
   }
+  const shouldUseNativePreset = collaborationMode === 'plan';
   const settings: any = {
-    developer_instructions: typeof developerInstructions === 'string' && developerInstructions.length > 0
+    developer_instructions: !shouldUseNativePreset && typeof developerInstructions === 'string' && developerInstructions.length > 0
       ? developerInstructions
       : null,
   };

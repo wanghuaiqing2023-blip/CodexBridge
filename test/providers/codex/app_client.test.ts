@@ -1701,6 +1701,56 @@ test('CodexAppClient forwards custom developer instructions into collaboration s
   );
 });
 
+test('CodexAppClient leaves plan developer instructions null so app-server injects native plan preset', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'plan this change',
+    model: 'gpt-5.4',
+    effort: null,
+    collaborationMode: 'plan',
+    developerInstructions: 'CodexBridge runtime constraints should not replace the native Plan preset.',
+    timeoutMs: 10,
+  });
+
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.deepEqual(turnStart.collaborationMode, {
+    mode: 'plan',
+    settings: {
+      model: 'gpt-5.4',
+      developer_instructions: null,
+    },
+  });
+});
+
 test('CodexAppClient forwards personality into turn/start payload', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

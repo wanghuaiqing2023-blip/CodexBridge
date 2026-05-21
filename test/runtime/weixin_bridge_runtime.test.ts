@@ -1757,6 +1757,47 @@ test('WeixinBridgeRuntime stops preview after a failed chunk and resumes final d
     { externalScopeId: 'wxid_1', content: '第二段。\n\n第三段。' },
   ]);});
 
+test('WeixinBridgeRuntime resumes final delivery from the delivered prefix after a partial send failure', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  let attempt = 0;
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+      attempt += 1;
+      if (attempt === 1) {
+        return {
+          success: false,
+          deliveredCount: 2,
+          deliveredText: 'alpha\n\nbeta',
+          failedIndex: 2,
+          failedText: 'gamma',
+          error: 'ret=-2',
+        };
+      }
+      return {
+        success: true,
+        deliveredCount: 1,
+        deliveredText: content,
+        failedIndex: null,
+        failedText: '',
+        error: '',
+      };
+    },
+    coordinator: {
+      async handleInboundEvent() {
+        return completeResponse('alpha\n\nbeta\n\ngamma');
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'alpha\n\nbeta\n\ngamma' },
+    { externalScopeId: 'wxid_1', content: 'gamma' },
+  ]);
+});
+
 test('WeixinBridgeRuntime sends a fixed failure message when provider marks the final as partial', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const runtime = makeRuntime({

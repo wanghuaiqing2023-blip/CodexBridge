@@ -874,8 +874,8 @@ export class WeixinBridgeRuntime {
       throw new Error(this.i18n.t('runtime.error.finalTextMissing', { scopeId: event.externalScopeId }));
     }
 
-    const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
-    if (normalizeComparableText(previewText) === normalizedFinal) {
+    let deliveredPrefix = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
+    if (normalizeComparableText(deliveredPrefix) === normalizedFinal) {
       return {
         source: codexTurnMeta?.finalSource ?? 'thread_items',
         mode: 'preview_already_complete',
@@ -887,7 +887,7 @@ export class WeixinBridgeRuntime {
     let lastAttemptedContent = '';
     let lastFailedDelivery: DeliveryResult | null = null;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const commitContent = resolveFinalCommitContent(finalText, previewText);
+      const commitContent = resolveFinalCommitContent(finalText, deliveredPrefix);
       if (!commitContent) {
         return {
           source: codexTurnMeta?.finalSource ?? 'thread_items',
@@ -915,6 +915,7 @@ export class WeixinBridgeRuntime {
         };
       }
       lastFailedDelivery = delivery;
+      deliveredPrefix = advanceDeliveredPrefix(finalText, deliveredPrefix, delivery.deliveredText);
       debugRuntime('final_delivery_attempt_failed', {
         scopeId: event.externalScopeId,
         attempt,
@@ -1839,6 +1840,27 @@ function resolveFinalCommitContent(finalText: string, previewText: string): stri
     return trailing || '';
   }
   return finalContent;
+}
+
+function advanceDeliveredPrefix(finalText: string, currentPrefix: string, deliveredText: string): string {
+  const finalContent = String(finalText ?? '').trim();
+  const currentContent = String(currentPrefix ?? '').trim();
+  const deliveredContent = String(deliveredText ?? '').trim();
+  if (!finalContent || !deliveredContent) {
+    return currentContent;
+  }
+  if (!currentContent) {
+    return finalContent.startsWith(deliveredContent) ? deliveredContent : currentContent;
+  }
+  if (!finalContent.startsWith(currentContent)) {
+    return currentContent;
+  }
+  const remaining = finalContent.slice(currentContent.length);
+  const deliveredOffset = remaining.indexOf(deliveredContent);
+  if (deliveredOffset < 0) {
+    return currentContent;
+  }
+  return finalContent.slice(0, currentContent.length + deliveredOffset + deliveredContent.length).trim();
 }
 
 function isComparablePrefix(prefixText: string, fullText: string): boolean {

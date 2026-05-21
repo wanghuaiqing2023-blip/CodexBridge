@@ -525,6 +525,7 @@ export class CodexAppClient extends EventEmitter {
     serviceTier = null,
     sandboxMode = 'workspace-write',
     approvalPolicy = 'on-request',
+    approvalsReviewer = null,
     ephemeral = null,
   }: {
     cwd?: string | null;
@@ -533,9 +534,11 @@ export class CodexAppClient extends EventEmitter {
     serviceTier?: string | null;
     sandboxMode?: string;
     approvalPolicy?: string;
+    approvalsReviewer?: string | null;
     ephemeral?: boolean | null;
   } = {}): Promise<ProviderThreadStartResult> {
-    const result: any = await this.request('thread/start', {
+    const normalizedApprovalsReviewer = normalizeApprovalsReviewerForRequest(approvalsReviewer);
+    const requestPayload: Record<string, unknown> = {
       cwd,
       title,
       approvalPolicy,
@@ -551,7 +554,11 @@ export class CodexAppClient extends EventEmitter {
       ephemeral,
       experimentalRawEvents: true,
       persistExtendedHistory: false,
-    }, { timeoutMs: 30_000 });
+    };
+    if (normalizedApprovalsReviewer) {
+      requestPayload.approvalsReviewer = normalizedApprovalsReviewer;
+    }
+    const result: any = await this.request('thread/start', requestPayload, { timeoutMs: 30_000 });
     return {
       threadId: String(result.thread.id),
       cwd: result.cwd ? String(result.cwd) : null,
@@ -559,21 +566,36 @@ export class CodexAppClient extends EventEmitter {
     };
   }
 
-  async resumeThread({ threadId }: { threadId: string }): Promise<unknown> {
-    return this.request('thread/resume', {
+  async resumeThread({
+    threadId,
+    approvalPolicy = null,
+    sandboxMode = null,
+    approvalsReviewer = null,
+  }: {
+    threadId: string;
+    approvalPolicy?: string | null;
+    sandboxMode?: string | null;
+    approvalsReviewer?: string | null;
+  }): Promise<unknown> {
+    const normalizedApprovalsReviewer = normalizeApprovalsReviewerForRequest(approvalsReviewer);
+    const requestPayload: Record<string, unknown> = {
       threadId,
       cwd: null,
-      approvalPolicy: null,
+      approvalPolicy,
       baseInstructions: null,
       developerInstructions: null,
       config: null,
-      sandbox: null,
+      sandbox: sandboxMode,
       model: null,
       modelProvider: null,
       personality: null,
       experimentalRawEvents: true,
       persistExtendedHistory: false,
-    }, { timeoutMs: 30_000 });
+    };
+    if (normalizedApprovalsReviewer) {
+      requestPayload.approvalsReviewer = normalizedApprovalsReviewer;
+    }
+    return this.request('thread/resume', requestPayload, { timeoutMs: 30_000 });
   }
 
   async getThreadGoal(threadId: string): Promise<ProviderThreadGoal | null> {
@@ -617,6 +639,7 @@ export class CodexAppClient extends EventEmitter {
     onProgress = null,
     onTurnStarted = null,
     onApprovalRequest = null,
+    approvalsReviewer = null,
     timeoutMs = 15 * 60 * 1000,
   }: {
     threadId: string;
@@ -626,6 +649,7 @@ export class CodexAppClient extends EventEmitter {
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
     onApprovalRequest?: ((request: ProviderApprovalRequest) => Promise<void> | void) | null;
+    approvalsReviewer?: string | null;
     timeoutMs?: number;
   }): Promise<ProviderThreadGoalFollowResult> {
     const capture = this.createTurnStartedCaptureForThread(threadId);
@@ -666,7 +690,7 @@ export class CodexAppClient extends EventEmitter {
       let turnId = await capture.wait(shouldResumeForFollow ? 250 : 2_000);
       if (!turnId && shouldResumeForFollow) {
         try {
-          await this.resumeThread({ threadId });
+          await this.resumeThread({ threadId, approvalsReviewer });
           resumedThread = true;
           turnId = await capture.wait(3_000);
         } catch (error) {
@@ -734,6 +758,7 @@ export class CodexAppClient extends EventEmitter {
     personality = null,
     sandboxMode = 'workspace-write',
     approvalPolicy = 'on-request',
+    approvalsReviewer = null,
     collaborationMode = 'default',
     developerInstructions = '',
     onProgress = null,
@@ -751,6 +776,7 @@ export class CodexAppClient extends EventEmitter {
     personality?: string | null;
     sandboxMode?: string;
     approvalPolicy?: string;
+    approvalsReviewer?: string | null;
     collaborationMode?: string;
     developerInstructions?: string;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
@@ -767,6 +793,7 @@ export class CodexAppClient extends EventEmitter {
       personality,
       approvalPolicy,
       sandboxMode,
+      approvalsReviewer: normalizeApprovalsReviewerForRequest(approvalsReviewer),
       collaborationMode,
       timeoutMs,
       inputCount: Array.isArray(input) ? input.length : 1,
@@ -781,6 +808,7 @@ export class CodexAppClient extends EventEmitter {
       ),
     });
     const sandboxPolicy = mapSandboxPolicy(sandboxMode);
+    const normalizedApprovalsReviewer = normalizeApprovalsReviewerForRequest(approvalsReviewer);
     const requestPayload: Record<string, unknown> = {
       threadId,
       input: Array.isArray(input) && input.length > 0
@@ -819,6 +847,10 @@ export class CodexAppClient extends EventEmitter {
     if (typeof personality === 'string' && personality.trim()) {
       requestPayload.personality = personality;
       (requestPayload.settings as Record<string, unknown>).personality = personality;
+    }
+    if (normalizedApprovalsReviewer) {
+      requestPayload.approvalsReviewer = normalizedApprovalsReviewer;
+      (requestPayload.settings as Record<string, unknown>).approvalsReviewer = normalizedApprovalsReviewer;
     }
     const result: any = await this.request('turn/start', requestPayload, { timeoutMs: 30_000 });
     const turn = result?.turn;
@@ -1721,6 +1753,7 @@ export class CodexAppClient extends EventEmitter {
       lastAssistantActivityAt: 0,
     };
     const itemOutputKinds = new Map();
+    const visibleAutoReviewNoticeKeys = new Set<string>();
     let sawTerminalNotification = false;
     let terminalRuntimeError: string | null = null;
     const onNotification = (notification) => {
@@ -1749,7 +1782,12 @@ export class CodexAppClient extends EventEmitter {
         sawTerminalNotification = true;
         return;
       }
-      const progress = extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
+      const progress = extractAutoReviewVisibleProgress(
+        notification,
+        threadId,
+        turnId,
+        visibleAutoReviewNoticeKeys,
+      ) ?? extractProgressUpdate(notification, turnId, itemOutputKinds, progressState);
       if (!progress) {
         return;
       }
@@ -3468,6 +3506,10 @@ function mapSandboxPolicy(mode) {
   return { type: 'workspaceWrite' };
 }
 
+function normalizeApprovalsReviewerForRequest(value: unknown): 'auto_review' | null {
+  return String(value ?? '').trim() === 'auto_review' ? 'auto_review' : null;
+}
+
 const TERMINAL_TURN_STATUS_KEYS = new Set([
   'completed',
   'complete',
@@ -4253,6 +4295,137 @@ function extractProgressUpdate(notification, turnId, itemOutputKinds, progressSt
     ? progressState.finalAnswerText
     : progressState.commentaryText;
   return buildProgressUpdate(currentText, `${currentText}${delta}`, outputKind);
+}
+
+function extractAutoReviewVisibleProgress(notification, threadId, turnId, seenNoticeKeys) {
+  if (!notification || typeof notification.method !== 'string') {
+    return null;
+  }
+  const method = notification.method;
+  const params = notification.params ?? {};
+  if (method === 'guardianWarning') {
+    const notificationThreadId = typeof params?.threadId === 'string' ? params.threadId : null;
+    if (notificationThreadId && notificationThreadId !== threadId) {
+      return null;
+    }
+    const message = normalizeNullableString(params?.message);
+    if (!message) {
+      return null;
+    }
+    return buildDedupedAutoReviewNotice(
+      seenNoticeKeys,
+      `guardianWarning:${notificationThreadId ?? threadId}:${message}`,
+      `Auto approval needs attention.\nReason: ${message}`,
+    );
+  }
+  if (method !== 'item/autoApprovalReview/completed') {
+    return null;
+  }
+  const notificationTurnId = extractNotificationTurnId(params);
+  if (!notificationTurnId || notificationTurnId !== turnId) {
+    return null;
+  }
+  const review = params?.review ?? {};
+  const status = normalizeAutoReviewStatus(review?.status);
+  if (!status || status === 'approved' || status === 'in_progress') {
+    return null;
+  }
+  const rationale = normalizeNullableString(review?.rationale)
+    ?? normalizeNullableString(params?.rationale)
+    ?? normalizeNullableString(params?.message);
+  const actionSummary = summarizeAutoReviewAction(params?.action);
+  const lines = [
+    `Auto approval ${formatAutoReviewStatus(status)}.`,
+  ];
+  if (rationale) {
+    lines.push(`Reason: ${rationale}`);
+  }
+  if (actionSummary) {
+    lines.push(`Action: ${actionSummary}`);
+  }
+  lines.push('No manual /allow request was created. Adjust the request or switch permissions mode, then retry.');
+  return buildDedupedAutoReviewNotice(
+    seenNoticeKeys,
+    [
+      method,
+      notificationTurnId,
+      params?.reviewId ?? params?.review_id ?? '',
+      status,
+      rationale ?? '',
+      actionSummary ?? '',
+    ].join(':'),
+    lines.join('\n'),
+  );
+}
+
+function buildDedupedAutoReviewNotice(seenNoticeKeys, key, text) {
+  if (seenNoticeKeys.has(key)) {
+    return null;
+  }
+  seenNoticeKeys.add(key);
+  return {
+    text,
+    delta: text,
+    outputKind: 'commentary',
+  };
+}
+
+function normalizeAutoReviewStatus(value) {
+  const normalized = String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalized === 'inprogress') {
+    return 'in_progress';
+  }
+  if (['in_progress', 'approved', 'denied', 'timed_out', 'timedout', 'aborted'].includes(normalized)) {
+    return normalized === 'timedout' ? 'timed_out' : normalized;
+  }
+  return normalized || null;
+}
+
+function formatAutoReviewStatus(status) {
+  switch (status) {
+    case 'denied':
+      return 'denied the requested action';
+    case 'timed_out':
+      return 'timed out';
+    case 'aborted':
+      return 'was aborted';
+    default:
+      return status;
+  }
+}
+
+function summarizeAutoReviewAction(action) {
+  const type = String(action?.type ?? '').trim();
+  if (!type) {
+    return null;
+  }
+  if (type === 'command') {
+    return normalizeNullableString(action?.command);
+  }
+  if (type === 'execve') {
+    const argv = Array.isArray(action?.argv)
+      ? action.argv.map((entry) => normalizeNullableString(entry)).filter(Boolean)
+      : [];
+    return argv.length > 0 ? argv.join(' ') : normalizeNullableString(action?.program);
+  }
+  if (type === 'apply_patch' || type === 'applyPatch') {
+    const files = Array.isArray(action?.files)
+      ? action.files.map((entry) => normalizeNullableString(entry)).filter(Boolean)
+      : [];
+    return files.length === 1 ? `apply_patch touching ${files[0]}` : `apply_patch touching ${files.length} files`;
+  }
+  if (type === 'network_access' || type === 'networkAccess') {
+    return normalizeNullableString(action?.target) ?? normalizeNullableString(action?.host);
+  }
+  if (type === 'mcp_tool_call' || type === 'mcpToolCall') {
+    const server = normalizeNullableString(action?.server);
+    const toolName = normalizeNullableString(action?.toolName) ?? normalizeNullableString(action?.tool_name);
+    return [server, toolName].filter(Boolean).join('.') || type;
+  }
+  if (type === 'request_permissions' || type === 'requestPermissions') {
+    return normalizeNullableString(action?.reason) ?? 'permission request';
+  }
+  return type;
 }
 
 function extractNotificationTurnId(params) {

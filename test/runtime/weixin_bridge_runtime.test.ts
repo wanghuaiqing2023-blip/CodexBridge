@@ -180,6 +180,42 @@ test('WeixinBridgeRuntime forwards poll events into the bridge coordinator and s
   assert.deepEqual(committed, ['cursor-1']);
 });
 
+test('WeixinBridgeRuntime delivers auto approval intervention progress to WeChat', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: 'Auto approval denied the requested action.\nReason: risky command',
+          delta: 'Auto approval denied the requested action.\nReason: risky command',
+          outputKind: 'commentary',
+        });
+        return {
+          type: 'message',
+          messages: [{ text: 'Auto approval denied the requested action.\nReason: risky command' }],
+          meta: {
+            codexTurn: {
+              outputState: 'complete',
+              previewText: 'Auto approval denied the requested action.\nReason: risky command',
+              finalSource: 'commentary_only',
+            },
+          },
+        };
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  const delivered = sent.map((message) => message.content).join('\n');
+  assert.ok(delivered.includes('Auto approval denied the requested action.'));
+  assert.ok(delivered.includes('Reason: risky command'));
+  assert.ok(!delivered.includes('本轮回复未完整取回，请重试。'));
+});
+
 test('WeixinBridgeRuntime runs internal thread cleanup as a single in-flight task', async () => {
   let resolveCleanup: (() => void) | null = null;
   let cleanupCalls = 0;

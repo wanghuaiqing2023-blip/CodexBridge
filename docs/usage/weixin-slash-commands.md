@@ -703,13 +703,22 @@ Supported presets:
 
 - `read-only`
 - `default`
+- `auto`
 - `full-access`
+
+`auto` keeps the normal workspace-write sandbox and routes approval requests to
+Codex app-server's native automatic reviewer (`approvalsReviewer:
+"auto_review"`). It is not the same as `full-access`: risky actions can still
+be denied, time out, or abort, and WeChat will only notify you when intervention
+is needed.
 
 Examples:
 
 ```text
 /permissions
 /perm
+/permissions auto
+/perm auto
 /permissions full-access
 /perm full-access
 ```

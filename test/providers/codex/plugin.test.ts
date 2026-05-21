@@ -40,8 +40,10 @@ function makeSessionSettings(overrides = {}) {
     serviceTier: null,
     collaborationMode: null,
     personality: null,
+    accessPreset: null,
     approvalPolicy: null,
     sandboxMode: null,
+    approvalsReviewer: null,
     locale: null,
     metadata: {},
     updatedAt: Date.now(),
@@ -93,7 +95,7 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
         calls.push(['start', profile.id]);
       },
       async startThread(params: any) {
-        calls.push(['startThread', profile.id, params.model]);
+        calls.push(['startThread', profile.id, params.model, params.approvalsReviewer]);
         return {
           threadId: `${profile.id}-thread-1`,
           cwd: params.cwd ?? null,
@@ -114,7 +116,7 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
       },
       async startTurn(params: any) {
         seenDeveloperInstructions = params.developerInstructions;
-        calls.push(['startTurn', profile.id, params.model]);
+        calls.push(['startTurn', profile.id, params.model, params.approvalsReviewer]);
         return {
           outputText: 'done',
           threadId: params.threadId,
@@ -142,6 +144,9 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   const started = await plugin.startThread({
     providerProfile: profile,
     cwd: '/tmp/work',
+    sessionSettings: makeSessionSettings({
+      approvalsReviewer: 'auto_review',
+    }),
   });
   const turn = await plugin.startTurn({
     providerProfile: profile,
@@ -149,7 +154,9 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
       codexThreadId: started.threadId,
       title: 'Existing thread',
     }),
-    sessionSettings: makeSessionSettings(),
+    sessionSettings: makeSessionSettings({
+      approvalsReviewer: 'auto_review',
+    }),
     event: {
       platform: 'weixin',
       externalScopeId: 'wxid_1',
@@ -162,6 +169,8 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.equal(turn.outputText, 'done');
   assert.ok(calls.some((entry) => entry[0] === 'startThread' && entry[2] === 'gpt-5.4'));
   assert.ok(calls.some((entry) => entry[0] === 'startTurn' && entry[2] === 'gpt-5.4'));
+  assert.ok(calls.some((entry) => entry[0] === 'startThread' && entry[3] === 'auto_review'));
+  assert.ok(calls.some((entry) => entry[0] === 'startTurn' && entry[3] === 'auto_review'));
   assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge runtime constraints/);
   assert.match(String(seenDeveloperInstructions ?? ''), /CodexBridge turn mode:/);
   assert.match(String(seenDeveloperInstructions ?? ''), /Standard bridge turn\./);
@@ -266,6 +275,9 @@ test('CodexProviderPlugin forwards native thread goal follow operations to the a
     providerProfile: profile,
     threadId: 'thread-1',
     objective: 'Keep CodexBridge reliable.',
+    sessionSettings: makeSessionSettings({
+      approvalsReviewer: 'auto_review',
+    }),
     onGoalUpdated: (goal: any) => {
       callbacks.push(['goal', goal?.objective]);
     },
@@ -286,6 +298,7 @@ test('CodexProviderPlugin forwards native thread goal follow operations to the a
   assert.equal(calls[0]?.[1]?.threadId, 'thread-1');
   assert.equal(calls[0]?.[1]?.objective, 'Keep CodexBridge reliable.');
   assert.equal(calls[0]?.[1]?.status, null);
+  assert.equal(calls[0]?.[1]?.approvalsReviewer, 'auto_review');
   assert.equal(calls[0]?.[1]?.timeoutMs, 1234);
 });
 

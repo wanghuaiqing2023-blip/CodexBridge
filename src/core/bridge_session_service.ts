@@ -140,6 +140,7 @@ export class BridgeSessionService {
       cwd,
       title,
       metadata: providerStartOptions,
+      sessionSettings: initialSettings,
     });
     const now = this.now();
     const session: BridgeSession = {
@@ -163,6 +164,7 @@ export class BridgeSessionService {
       accessPreset: initialSettings.accessPreset ?? null,
       approvalPolicy: initialSettings.approvalPolicy ?? null,
       sandboxMode: initialSettings.sandboxMode ?? null,
+      approvalsReviewer: initialSettings.approvalsReviewer ?? null,
       locale: initialSettings.locale ?? null,
       metadata: initialSettings.metadata ?? {},
       updatedAt: now,
@@ -188,6 +190,7 @@ export class BridgeSessionService {
       cwd,
       title,
       metadata: providerStartOptions,
+      sessionSettings: initialSettings,
     });
     const now = this.now();
     const session: BridgeSession = {
@@ -210,6 +213,7 @@ export class BridgeSessionService {
       accessPreset: initialSettings.accessPreset ?? null,
       approvalPolicy: initialSettings.approvalPolicy ?? null,
       sandboxMode: initialSettings.sandboxMode ?? null,
+      approvalsReviewer: initialSettings.approvalsReviewer ?? null,
       locale: initialSettings.locale ?? null,
       metadata: initialSettings.metadata ?? {},
       updatedAt: now,
@@ -301,6 +305,7 @@ export class BridgeSessionService {
       accessPreset: null,
       approvalPolicy: null,
       sandboxMode: null,
+      approvalsReviewer: null,
       locale: initialSettings.locale ?? null,
       metadata: {},
       ...initialSettings,

@@ -164,6 +164,8 @@ Recommended entrypoints:
 /lang
 /permissions
 /perm
+/permissions auto
+/perm auto
 /allow
 /al
 /allow 1

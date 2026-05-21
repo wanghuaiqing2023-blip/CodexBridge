@@ -319,9 +319,9 @@ class FakeProviderPlugin {
     return this.baseTime + this.clock;
   }
 
-  async startThread({ providerProfile, cwd, title, metadata, ephemeral = null }) {
+  async startThread({ providerProfile, cwd, title, metadata, ephemeral = null, sessionSettings = null }) {
     this.threadCounter += 1;
-    this.startThreadCalls.push({ providerProfile, cwd, title, metadata, ephemeral });
+    this.startThreadCalls.push({ providerProfile, cwd, title, metadata, ephemeral, sessionSettings });
     const thread = {
       threadId: `${providerProfile.id}-thread-${this.threadCounter}`,
       cwd: cwd ?? `/tmp/${providerProfile.id}`,
@@ -375,8 +375,8 @@ class FakeProviderPlugin {
     };
   }
 
-  async resumeThread({ threadId }) {
-    this.resumeThreadCalls.push({ threadId });
+  async resumeThread({ threadId, sessionSettings = null }) {
+    this.resumeThreadCalls.push({ threadId, sessionSettings });
     const existingThread = this.threads.get(threadId);
     if (!existingThread) {
       const restored = {
@@ -1701,6 +1701,7 @@ test('/status reports when no bridge session is bound yet', async () => {
   assert.ok(lines.includes('模型：gpt-5.4'));
   assert.ok(lines.includes('推理强度：'));
   assert.ok(lines.includes('权限预设：'));
+  assert.ok(lines.includes('审批 reviewer：user'));
   assert.ok(lines.includes('完整信息：/status details'));
 });
 
@@ -1774,7 +1775,8 @@ test('/status includes active-turn state when a session is idle', async () => {
   assert.ok(lines.includes('速度模式：normal'));
   assert.ok(lines.includes('模型：gpt-5.4'));
   assert.ok(lines.includes('推理强度：'));
-  assert.ok(lines.includes('权限预设：'));
+  assert.ok(lines.includes('权限预设：default'));
+  assert.ok(lines.includes('审批 reviewer：user'));
   assert.ok(lines.includes('完整信息：/status details'));
   assert.ok(lines.every((line) => !/Scope：/.test(line)));
   assert.ok(lines.every((line) => !/当前 Turn：/.test(line)));
@@ -5701,7 +5703,7 @@ test('slash commands support -help, -helps, and --help variants', async () => {
 
     const body = result.messages[0]?.text ?? '';
     assert.match(body, /命令：\/permissions/);
-    assert.match(body, /\/permissions <read-only\|default\|full-access>/);
+    assert.match(body, /\/permissions <read-only\|default\|auto\|full-access>/);
   }
 });
 
@@ -6838,7 +6840,8 @@ test('/provider keeps WeChat-facing command UX stable across multiple provider p
     assert.ok(statusLines.includes('速度模式：normal'));
     assert.ok(statusLines.includes('模型：gpt-5.4'));
     assert.ok(statusLines.includes('推理强度：'));
-    assert.ok(statusLines.includes('权限预设：'));
+    assert.ok(statusLines.includes('权限预设：default'));
+    assert.ok(statusLines.includes('审批 reviewer：user'));
     assert.ok(statusLines.includes('完整信息：/status details'));
     assert.ok(statusLines.every((line) => !/Scope：/.test(line)));
     assert.ok(statusLines.every((line) => !/当前 Turn：/.test(line)));
@@ -13127,25 +13130,28 @@ test('/permissions shows current access settings and updates the preset for the 
   assert.equal(statusBefore.messages[0]?.text ?? '', '当前权限预设：default');
   assert.equal(statusBefore.messages[1]?.text ?? '', '审批策略：on-request');
   assert.equal(statusBefore.messages[2]?.text ?? '', '沙箱模式：workspace-write');
-  assert.equal(statusBefore.messages[4]?.text ?? '', '可选命令：');
-  assert.equal(statusBefore.messages[5]?.text ?? '', '- /permissions read-only');
-  assert.equal(statusBefore.messages[6]?.text ?? '', '- /permissions default');
-  assert.equal(statusBefore.messages[7]?.text ?? '', '- /permissions full-access');
-  assert.equal(statusBefore.messages[9]?.text ?? '', '说明：');
-  assert.equal(statusBefore.messages[10]?.text ?? '', '- read-only：按需审批 + 只读');
-  assert.equal(statusBefore.messages[11]?.text ?? '', '- default：按需审批 + 工作区可写');
-  assert.equal(statusBefore.messages[12]?.text ?? '', '- full-access：不审批 + 完全访问');
+  assert.equal(statusBefore.messages[3]?.text ?? '', '审批 reviewer：user');
+  assert.ok(statusBefore.messages.some((message) => message.text === '- /permissions auto'));
+  assert.ok(statusBefore.messages.some((message) => message.text === '- auto：自动审批 reviewer + 工作区可写'));
 
   const updated = await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
     externalScopeId: 'wx-user-1',
-    text: '/permissions full-access',
+    text: '/permissions auto',
   });
 
-  assert.equal(updated.messages[0]?.text ?? '', '已切换权限预设：full-access');
-  assert.equal(updated.messages[1]?.text ?? '', '审批策略：never');
-  assert.equal(updated.messages[2]?.text ?? '', '沙箱模式：danger-full-access');
-  assert.equal(updated.messages[3]?.text ?? '', '下一轮生效。');
+  assert.equal(updated.messages[0]?.text ?? '', '已切换权限预设：auto');
+  assert.equal(updated.messages[1]?.text ?? '', '审批策略：on-request');
+  assert.equal(updated.messages[2]?.text ?? '', '沙箱模式：workspace-write');
+  assert.equal(updated.messages[3]?.text ?? '', '审批 reviewer：auto_review');
+  assert.equal(updated.messages[4]?.text ?? '', '下一轮生效。');
+
+  const status = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/status',
+  });
+  assert.ok(status.messages.some((message) => message.text === '审批 reviewer：auto_review'));
 
   await runtime.services.bridgeCoordinator.handleInboundEvent({
     platform: 'weixin',
@@ -13154,9 +13160,19 @@ test('/permissions shows current access settings and updates the preset for the 
   });
 
   const lastTurn = openai.startTurnCalls.at(-1);
-  assert.equal(lastTurn?.sessionSettings?.accessPreset, 'full-access');
-  assert.equal(lastTurn?.sessionSettings?.approvalPolicy, 'never');
-  assert.equal(lastTurn?.sessionSettings?.sandboxMode, 'danger-full-access');
+  assert.equal(lastTurn?.sessionSettings?.accessPreset, 'auto');
+  assert.equal(lastTurn?.sessionSettings?.approvalPolicy, 'on-request');
+  assert.equal(lastTurn?.sessionSettings?.sandboxMode, 'workspace-write');
+  assert.equal(lastTurn?.sessionSettings?.approvalsReviewer, 'auto_review');
+
+  const reset = await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: '/permissions default',
+  });
+  assert.equal(reset.messages[3]?.text ?? '', '审批 reviewer：user');
+  const resetSettings = runtime.services.bridgeSessions.getSessionSettings(lastTurn.sessionSettings.bridgeSessionId);
+  assert.equal(resetSettings?.approvalsReviewer ?? null, null);
 });
 
 test('/permissions rejects unknown presets', async () => {
@@ -13174,7 +13190,7 @@ test('/permissions rejects unknown presets', async () => {
     text: '/permissions yolo',
   });
 
-  assert.equal(result.messages[0]?.text ?? '', '用法：/permissions [read-only|default|full-access]');
+  assert.equal(result.messages[0]?.text ?? '', '用法：/permissions [read-only|default|auto|full-access]');
 });
 
 test('bridge coordinator converts Codex turn timeout into a user-visible timeout state', async () => {

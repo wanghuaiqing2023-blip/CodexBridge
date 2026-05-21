@@ -105,10 +105,12 @@ test('CodexAppClient forwards thread title and ephemeral start requests', async 
     cwd: '/tmp/work',
     title: 'Assistant Record Command Skill',
     ephemeral: true,
+    approvalsReviewer: 'auto_review',
   });
 
   assert.equal(seenParams.title, 'Assistant Record Command Skill');
   assert.equal(seenParams.ephemeral, true);
+  assert.equal(seenParams.approvalsReviewer, 'auto_review');
   assert.equal(started.threadId, 'thread-1');
 });
 
@@ -373,6 +375,7 @@ test('CodexAppClient resumes cold goal threads and follows the resumed native tu
   const result = await client.setThreadGoalAndFollow({
     threadId: 'thread-1',
     objective: 'Restart cold thread',
+    approvalsReviewer: 'auto_review',
     timeoutMs: 1000,
   });
 
@@ -380,7 +383,9 @@ test('CodexAppClient resumes cold goal threads and follows the resumed native tu
   assert.equal(result.threadStatus, 'notLoaded');
   assert.equal(result.resumedThread, true);
   assert.equal(result.turnResult?.outputText, 'Cold goal finished.');
-  assert.equal(calls.some((call) => call.method === 'thread/resume'), true);
+  const resumeCall = calls.find((call) => call.method === 'thread/resume');
+  assert.equal(Boolean(resumeCall), true);
+  assert.equal(resumeCall?.params.approvalsReviewer, 'auto_review');
   assert.equal(calls.some((call) => call.method === 'turn/interrupt'), false);
 });
 
@@ -773,6 +778,7 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
     model: 'gpt-5.4',
     effort: 'medium',
     collaborationMode: 'default',
+    approvalsReviewer: 'auto_review',
     timeoutMs: 10,
   });
 
@@ -788,12 +794,14 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
   });
   assert.deepEqual(turnStart.settings, {
     approvalPolicy: 'on-request',
+    approvalsReviewer: 'auto_review',
     sandboxPolicy: {
       type: 'workspaceWrite',
     },
     model: 'gpt-5.4',
     reasoningEffort: 'medium',
   });
+  assert.equal(turnStart.approvalsReviewer, 'auto_review');
   assert.deepEqual(turnStart.input, [{
     type: 'text',
     text: 'hello',
@@ -849,6 +857,82 @@ test('CodexAppClient startTurn omits null collaboration setting strings', async 
   });
   assert.equal('model' in turnStart, false);
   assert.equal('effort' in turnStart, false);
+});
+
+test('CodexAppClient surfaces auto review denials and keeps approvals quiet', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+  const progress: any[] = [];
+  let emitted = false;
+
+  client.request = async (method, params) => {
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-auto-1' } };
+    }
+    if (method === 'thread/read') {
+      if (!emitted) {
+        emitted = true;
+        client.emit('notification', {
+          method: 'item/autoApprovalReview/completed',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-auto-1',
+            reviewId: 'review-approved',
+            review: {
+              status: 'approved',
+              rationale: 'Safe action.',
+            },
+            action: {
+              type: 'command',
+              command: 'echo ok',
+            },
+          },
+        });
+        client.emit('notification', {
+          method: 'item/autoApprovalReview/completed',
+          params: {
+            threadId: 'thread-1',
+            turnId: 'turn-auto-1',
+            reviewId: 'review-denied',
+            review: {
+              status: 'denied',
+              rationale: 'Would write outside the workspace.',
+            },
+            action: {
+              type: 'command',
+              command: 'rm -rf /tmp/outside',
+            },
+          },
+        });
+      }
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-auto-1',
+            status: 'completed',
+            items: [],
+          }],
+        },
+      };
+    }
+    throw new Error(`Unexpected method: ${method}`);
+  };
+
+  const result = await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'try risky command',
+    approvalsReviewer: 'auto_review',
+    onProgress: (update) => progress.push(update),
+    timeoutMs: 1000,
+  });
+
+  assert.equal(progress.length, 1);
+  assert.match(progress[0]?.delta ?? '', /Auto approval denied/);
+  assert.match(progress[0]?.delta ?? '', /Would write outside the workspace/);
+  assert.match(result.previewText, /Auto approval denied/);
 });
 
 test('CodexAppClient startTurn lets app-server inject built-in plan instructions', async () => {

@@ -89,19 +89,24 @@ export class CodexProviderPlugin {
     cwd = null,
     title = null,
     ephemeral = null,
+    sessionSettings = null,
   }: {
     providerProfile: ProviderProfile;
     cwd?: string | null;
     title?: string | null;
     ephemeral?: boolean | null;
+    sessionSettings?: Partial<SessionSettings> | null;
   }): Promise<ProviderThreadStartResult> {
     const client = await this.ensureClient(providerProfile);
-    const modelInfo = await this.resolveModelInfo(providerProfile, client, null);
+    const modelInfo = await this.resolveModelInfo(providerProfile, client, sessionSettings?.model ?? null);
     return client.startThread({
       cwd,
       title,
       model: modelInfo?.model ?? null,
       ephemeral,
+      approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
+      sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
     });
   }
 
@@ -160,6 +165,7 @@ export class CodexProviderPlugin {
     threadId,
     objective = null,
     status = null,
+    sessionSettings = null,
     onGoalUpdated = null,
     onProgress = null,
     onTurnStarted = null,
@@ -170,6 +176,7 @@ export class CodexProviderPlugin {
     threadId: string;
     objective?: string | null;
     status?: string | null;
+    sessionSettings?: Partial<SessionSettings> | null;
     onGoalUpdated?: ((goal: ProviderThreadGoal | null) => Promise<void> | void) | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
@@ -181,6 +188,7 @@ export class CodexProviderPlugin {
       threadId,
       objective,
       status,
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
       onGoalUpdated,
       onProgress,
       onTurnStarted,
@@ -242,12 +250,19 @@ export class CodexProviderPlugin {
   async resumeThread({
     providerProfile,
     threadId,
+    sessionSettings = null,
   }: {
     providerProfile: ProviderProfile;
     threadId: string;
+    sessionSettings?: Partial<SessionSettings> | null;
   }): Promise<unknown> {
     const client = await this.ensureClient(providerProfile);
-    return client.resumeThread({ threadId });
+    return client.resumeThread({
+      threadId,
+      approvalPolicy: sessionSettings?.approvalPolicy ?? null,
+      sandboxMode: sessionSettings?.sandboxMode ?? null,
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
+    });
   }
 
   async reconnectProfile({
@@ -309,6 +324,7 @@ export class CodexProviderPlugin {
       personality,
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
       collaborationMode: normalizeCodexCollaborationMode(sessionSettings?.collaborationMode ?? null),
       developerInstructions,
       onProgress,
@@ -1094,4 +1110,8 @@ function normalizeCodexServiceTier(value: string | null | undefined): string | n
 
 function normalizeCodexCollaborationMode(value: string | null | undefined): 'default' | 'plan' {
   return String(value ?? '').trim().toLowerCase() === 'plan' ? 'plan' : 'default';
+}
+
+function normalizeCodexApprovalsReviewer(value: string | null | undefined): 'auto_review' | null {
+  return String(value ?? '').trim() === 'auto_review' ? 'auto_review' : null;
 }

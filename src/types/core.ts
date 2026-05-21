@@ -22,9 +22,10 @@ export interface SessionSettings {
   serviceTier: string | null;
   collaborationMode?: 'plan' | 'default' | null;
   personality?: 'friendly' | 'pragmatic' | 'none' | null;
-  accessPreset?: 'read-only' | 'default' | 'full-access' | null;
+  accessPreset?: 'read-only' | 'default' | 'auto' | 'full-access' | null;
   approvalPolicy?: string | null;
   sandboxMode?: string | null;
+  approvalsReviewer?: 'user' | 'auto_review' | null;
   locale: string | null;
   metadata: Record<string, unknown>;
   updatedAt: number;

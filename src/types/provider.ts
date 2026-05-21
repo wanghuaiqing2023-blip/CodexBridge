@@ -36,9 +36,10 @@ export interface ProviderTurnSessionSettings {
   serviceTier: string | null;
   collaborationMode?: 'plan' | 'default' | null;
   personality?: 'friendly' | 'pragmatic' | 'none' | null;
-  accessPreset?: 'read-only' | 'default' | 'full-access' | null;
+  accessPreset?: 'read-only' | 'default' | 'auto' | 'full-access' | null;
   approvalPolicy?: string | null;
   sandboxMode?: string | null;
+  approvalsReviewer?: 'user' | 'auto_review' | null;
   locale: string | null;
   metadata: Record<string, unknown>;
   updatedAt: number;
@@ -436,6 +437,7 @@ export interface ProviderPluginContract {
     title?: string | null;
     ephemeral?: boolean | null;
     metadata?: Record<string, unknown>;
+    sessionSettings?: Partial<ProviderTurnSessionSettings> | null;
   }): Promise<ProviderThreadStartResult>;
   readThread(params: {
     providerProfile: ProviderProfile;
@@ -458,6 +460,7 @@ export interface ProviderPluginContract {
     threadId: string;
     objective?: string | null;
     status?: string | null;
+    sessionSettings?: Partial<ProviderTurnSessionSettings> | null;
     onGoalUpdated?: ((goal: ProviderThreadGoal | null) => Promise<void> | void) | null;
     onProgress?: ((progress: ProviderTurnProgress) => Promise<void> | void) | null;
     onTurnStarted?: ((meta: Record<string, unknown>) => Promise<void> | void) | null;
@@ -483,6 +486,11 @@ export interface ProviderPluginContract {
     providerProfile: ProviderProfile;
     threadId: string;
   }): Promise<void>;
+  resumeThread?(params: {
+    providerProfile: ProviderProfile;
+    threadId: string;
+    sessionSettings?: Partial<ProviderTurnSessionSettings> | null;
+  }): Promise<unknown>;
   startTurn(params: {
     providerProfile: ProviderProfile;
     bridgeSession: ProviderTurnSession;

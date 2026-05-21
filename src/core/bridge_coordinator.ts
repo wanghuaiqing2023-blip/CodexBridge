@@ -1484,6 +1484,7 @@ export class BridgeCoordinator {
         this.t('coordinator.status.personality', { value: formatPersonality(null, this.currentI18n) }),
         this.t('coordinator.status.reasoningEffort', { value: '' }),
         this.t('coordinator.status.accessPreset', { value: '' }),
+        this.t('coordinator.status.approvalsReviewer', { value: formatApprovalsReviewer(null) }),
         ...platformStatusLines,
         ...(!details ? [this.t('coordinator.status.detailHint')] : []),
       ];
@@ -1505,7 +1506,8 @@ export class BridgeCoordinator {
       this.t('coordinator.status.planMode', { value: formatPlanMode(settings?.collaborationMode ?? null, this.currentI18n) }),
       this.t('coordinator.status.personality', { value: formatPersonality(settings?.personality ?? null, this.currentI18n) }),
       this.t('coordinator.status.reasoningEffort', { value: settings?.reasoningEffort ?? '' }),
-      this.t('coordinator.status.accessPreset', { value: settings?.accessPreset ?? '' }),
+      this.t('coordinator.status.accessPreset', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
+      this.t('coordinator.status.approvalsReviewer', { value: formatApprovalsReviewer(resolveApprovalsReviewer(settings)) }),
       ...foregroundLines,
       ...backgroundLines,
     ];
@@ -1529,6 +1531,7 @@ export class BridgeCoordinator {
       this.t('coordinator.status.accessPreset', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
       this.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
       this.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
+      this.t('coordinator.status.approvalsReviewer', { value: formatApprovalsReviewer(resolveApprovalsReviewer(settings)) }),
       this.t('coordinator.status.customInstructions', {
         value: formatInstructionsStatus(instructionsSnapshot.exists, this.currentI18n),
       }),
@@ -5009,6 +5012,7 @@ export class BridgeCoordinator {
         threadId: resolved.session.codexThreadId,
         objective,
         status,
+        sessionSettings: this.bridgeSessions.getSessionSettings(resolved.session.id),
         onGoalUpdated: async (goal) => {
           await emitProgressUpdate(
             options.onProgress ?? null,
@@ -6050,11 +6054,13 @@ export class BridgeCoordinator {
       accessPreset: preset,
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
+      approvalsReviewer: access.approvalsReviewer,
     });
     return messageResponse([
       this.t('coordinator.permissions.updated', { value: formatAccessPreset(preset) }),
       this.t('coordinator.status.approvalPolicy', { value: access.approvalPolicy }),
       this.t('coordinator.status.sandboxMode', { value: access.sandboxMode }),
+      this.t('coordinator.status.approvalsReviewer', { value: formatApprovalsReviewer(access.approvalsReviewer) }),
       this.t('coordinator.permissions.nextTurn'),
     ], buildSessionMeta(session));
   }
@@ -10834,6 +10840,7 @@ export class BridgeCoordinator {
         accessPreset: inheritedSettings?.accessPreset ?? null,
         approvalPolicy: inheritedSettings?.approvalPolicy ?? null,
         sandboxMode: inheritedSettings?.sandboxMode ?? null,
+        approvalsReviewer: inheritedSettings?.approvalsReviewer ?? null,
       },
       threadBridgeSessionId: candidate.mode === 'thread' ? boundSession?.id ?? null : null,
     };
@@ -12370,6 +12377,7 @@ export class BridgeCoordinator {
       accessPreset: currentSettings?.accessPreset ?? null,
       approvalPolicy: currentSettings?.approvalPolicy ?? null,
       sandboxMode: currentSettings?.sandboxMode ?? null,
+      approvalsReviewer: currentSettings?.approvalsReviewer ?? null,
       metadata: {
         ...(currentSettings?.metadata ?? {}),
       },
@@ -18702,11 +18710,12 @@ function getCommandHelpSpecs(i18n: Translator) {
     summary: i18n.t('coordinator.help.summary.permissions'),
     usage: [
       '/permissions',
-      '/permissions <read-only|default|full-access>',
+      '/permissions <read-only|default|auto|full-access>',
       '/permissions -h',
     ],
     examples: [
       '/permissions',
+      '/permissions auto',
       '/permissions full-access',
     ],
     notes: [
@@ -21151,7 +21160,7 @@ function truncateUserError(message, limit = 180) {
   return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
 }
 
-const ACCESS_PRESETS = new Set(['read-only', 'default', 'full-access']);
+const ACCESS_PRESETS = new Set(['read-only', 'default', 'auto', 'full-access']);
 
 function normalizeAccessPreset(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
@@ -21275,18 +21284,28 @@ function resolveAccessModeForPreset(preset) {
         preset,
         approvalPolicy: 'on-request',
         sandboxMode: 'read-only',
+        approvalsReviewer: null,
+      };
+    case 'auto':
+      return {
+        preset,
+        approvalPolicy: 'on-request',
+        sandboxMode: 'workspace-write',
+        approvalsReviewer: 'auto_review',
       };
     case 'full-access':
       return {
         preset,
         approvalPolicy: 'never',
         sandboxMode: 'danger-full-access',
+        approvalsReviewer: null,
       };
     default:
       return {
         preset: 'default',
         approvalPolicy: 'on-request',
         sandboxMode: 'workspace-write',
+        approvalsReviewer: null,
       };
   }
 }
@@ -21299,10 +21318,19 @@ function resolveSandboxMode(settings) {
   return settings?.sandboxMode ?? resolveAccessModeForPreset(resolveAccessPreset(settings)).sandboxMode;
 }
 
+function resolveApprovalsReviewer(settings) {
+  return settings?.approvalsReviewer ?? resolveAccessModeForPreset(resolveAccessPreset(settings)).approvalsReviewer;
+}
+
 function formatAccessPreset(preset) {
   if (preset === 'read-only') return 'read-only';
+  if (preset === 'auto') return 'auto';
   if (preset === 'full-access') return 'full-access';
   return 'default';
+}
+
+function formatApprovalsReviewer(value) {
+  return value === 'auto_review' ? 'auto_review' : 'user';
 }
 
 function buildThreadOperationKey(scopeRef: PlatformScopeRef) {
@@ -21388,15 +21416,18 @@ function renderPermissionsLines(settings, i18n: Translator) {
     i18n.t('coordinator.permissions.current', { value: formatAccessPreset(resolveAccessPreset(settings)) }),
     i18n.t('coordinator.status.approvalPolicy', { value: resolveApprovalPolicy(settings) }),
     i18n.t('coordinator.status.sandboxMode', { value: resolveSandboxMode(settings) }),
+    i18n.t('coordinator.status.approvalsReviewer', { value: formatApprovalsReviewer(resolveApprovalsReviewer(settings)) }),
     '',
     i18n.t('coordinator.permissions.availableCommands'),
     '- /permissions read-only',
     '- /permissions default',
+    '- /permissions auto',
     '- /permissions full-access',
     '',
     i18n.t('coordinator.permissions.notes'),
     i18n.t('coordinator.permissions.readOnlyDesc'),
     i18n.t('coordinator.permissions.defaultDesc'),
+    i18n.t('coordinator.permissions.autoDesc'),
     i18n.t('coordinator.permissions.fullAccessDesc'),
     '',
     i18n.t('coordinator.permissions.applyNextTurn'),

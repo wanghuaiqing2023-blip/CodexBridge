@@ -17236,6 +17236,7 @@ function renderThreadsPageMessage({
       : '';
     lines.push(`${marker} ${index + 1}. ${formatThreadTitle(item.title, item.preview, i18n)}${pinnedTag}${archivedTag}`);
     lines.push(`   ${i18n.t('coordinator.threadList.preview', { preview: normalizeThreadPreview(item.preview, i18n) })}`);
+    lines.push(`   ${i18n.t('coordinator.threadList.cwd', { value: normalizeCwd(item.cwd) ?? i18n.t('common.notSet') })}`);
     lines.push(`   ${i18n.t('coordinator.threadList.updatedAt', { value: formatRelativeTime(item.updatedAt, i18n) })}`);
     lines.push('');
   }

@@ -6938,6 +6938,7 @@ test('/threads renders a paged thread browser with previews and commands', async
   assert.match(text, /线程列表 \| openai-default/);
   assert.match(text, /当前绑定：OpenAI Default thread 1/);
   assert.match(text, /\* \d+\. OpenAI Default thread 1/);
+  assert.match(text, /\/tmp\/openai-default/);
   assert.match(text, /预览：hello from wx/);
   assert.match(text, /操作：\/open \d+  \/peek \d+  \/rename \d+ 新名字  \/threads del \d+  \/threads pin \d+  \/threads all  \/threads pin  \/search 关键词/);
 });

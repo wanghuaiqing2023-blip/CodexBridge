@@ -810,6 +810,50 @@ test('CodexAppClient startTurn sends explicit default collaboration settings pay
   assert.equal('personality' in turnStart, false);
 });
 
+test('CodexAppClient startTurn sends user approvals reviewer to clear sticky auto review', async () => {
+  const client = new CodexAppClient({
+    codexCliBin: 'codex',
+  });
+
+  const calls = [];
+  client.request = async (method, params) => {
+    calls.push([method, params]);
+    if (method === 'turn/start') {
+      return { turn: { id: 'turn-1' } };
+    }
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          name: 'Thread 1',
+          turns: [{
+            id: 'turn-1',
+            status: 'completed',
+            items: [{
+              type: 'assistant_message',
+              text: 'done',
+            }],
+          }],
+        },
+      };
+    }
+    return {};
+  };
+
+  await client.startTurn({
+    threadId: 'thread-1',
+    inputText: 'hello',
+    model: 'gpt-5.4',
+    collaborationMode: 'default',
+    approvalsReviewer: 'user',
+    timeoutMs: 10,
+  });
+
+  const turnStart = calls.find(([method]) => method === 'turn/start')?.[1];
+  assert.equal(turnStart.approvalsReviewer, 'user');
+  assert.equal(turnStart.settings.approvalsReviewer, 'user');
+});
+
 test('CodexAppClient startTurn omits null collaboration setting strings', async () => {
   const client = new CodexAppClient({
     codexCliBin: 'codex',

@@ -106,7 +106,7 @@ export class CodexProviderPlugin {
       ephemeral,
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
-      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? 'user'),
     });
   }
 
@@ -188,7 +188,7 @@ export class CodexProviderPlugin {
       threadId,
       objective,
       status,
-      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? 'user'),
       onGoalUpdated,
       onProgress,
       onTurnStarted,
@@ -261,7 +261,7 @@ export class CodexProviderPlugin {
       threadId,
       approvalPolicy: sessionSettings?.approvalPolicy ?? null,
       sandboxMode: sessionSettings?.sandboxMode ?? null,
-      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? 'user'),
     });
   }
 
@@ -324,7 +324,7 @@ export class CodexProviderPlugin {
       personality,
       approvalPolicy: sessionSettings?.approvalPolicy ?? 'on-request',
       sandboxMode: sessionSettings?.sandboxMode ?? 'workspace-write',
-      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? null),
+      approvalsReviewer: normalizeCodexApprovalsReviewer(sessionSettings?.approvalsReviewer ?? 'user'),
       collaborationMode: normalizeCodexCollaborationMode(sessionSettings?.collaborationMode ?? null),
       developerInstructions,
       onProgress,
@@ -1112,6 +1112,13 @@ function normalizeCodexCollaborationMode(value: string | null | undefined): 'def
   return String(value ?? '').trim().toLowerCase() === 'plan' ? 'plan' : 'default';
 }
 
-function normalizeCodexApprovalsReviewer(value: string | null | undefined): 'auto_review' | null {
-  return String(value ?? '').trim() === 'auto_review' ? 'auto_review' : null;
+function normalizeCodexApprovalsReviewer(value: string | null | undefined): 'user' | 'auto_review' | null {
+  const normalized = String(value ?? '').trim();
+  if (normalized === 'auto_review') {
+    return 'auto_review';
+  }
+  if (normalized === 'user') {
+    return 'user';
+  }
+  return null;
 }

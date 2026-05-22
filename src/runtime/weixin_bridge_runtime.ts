@@ -89,14 +89,21 @@ interface BridgeCoordinatorLike {
 interface StreamState {
   lastObservedFinal: string;
   pendingPreview: string;
+  pendingPreviewSegments: PendingPreviewSegment[];
   previewPumpPromise: Promise<void> | null;
   previewStopped: boolean;
   firstPreviewSent: boolean;
   nextPreviewAt: number;
   smallPreviewDelayUntil: number;
   streamedText: string;
+  streamedFinalAnswerText: string;
   sentChunkCount: number;
   streamingDisabled: boolean;
+}
+
+interface PendingPreviewSegment {
+  outputKind: 'commentary' | 'final_answer';
+  text: string;
 }
 
 interface ScheduledDispatch {
@@ -652,6 +659,7 @@ export class WeixinBridgeRuntime {
             }
             streamState.streamingDisabled = true;
             streamState.pendingPreview = '';
+            streamState.pendingPreviewSegments = [];
             streamState.lastObservedFinal = nextText;
             return;
           }
@@ -672,7 +680,7 @@ export class WeixinBridgeRuntime {
       return;
     }
 
-    streamState.pendingPreview += delta;
+    appendPendingPreviewSegment(streamState, progress.outputKind, delta);
 
     this.ensurePreviewPump(event, streamState);
   }
@@ -717,8 +725,10 @@ export class WeixinBridgeRuntime {
         }
       }
       streamState.smallPreviewDelayUntil = 0;
+      const consumedPreview = consumePendingPreviewSegments(streamState, chunk);
       streamState.pendingPreview = streamState.pendingPreview.slice(chunk.length).replace(/^[\s\n]+/u, '');
-      await this.sendPreviewChunk(event, streamState, chunk.trim());
+      trimLeadingPendingPreviewSegments(streamState);
+      await this.sendPreviewChunk(event, streamState, chunk.trim(), consumedPreview.finalAnswerText.trim());
       if (streamState.streamingDisabled || streamState.previewStopped) {
         return;
       }
@@ -729,7 +739,12 @@ export class WeixinBridgeRuntime {
     }
   }
 
-  async sendPreviewChunk(event: InboundTextEvent, streamState: StreamState, chunk: string): Promise<void> {
+  async sendPreviewChunk(
+    event: InboundTextEvent,
+    streamState: StreamState,
+    chunk: string,
+    finalAnswerChunk = '',
+  ): Promise<void> {
     const normalizedChunk = String(chunk ?? '').trim();
     if (!normalizedChunk) {
       return;
@@ -753,11 +768,13 @@ export class WeixinBridgeRuntime {
       return;
     }
     appendPreviewText(streamState, delivery.deliveredText || normalizedChunk);
+    appendFinalAnswerPreviewText(streamState, finalAnswerChunk);
   }
 
   async stopPreviewStreaming(streamState: StreamState): Promise<void> {
     streamState.previewStopped = true;
     streamState.pendingPreview = '';
+    streamState.pendingPreviewSegments = [];
     streamState.smallPreviewDelayUntil = 0;
     const pump = streamState.previewPumpPromise;
     if (pump) {
@@ -790,12 +807,15 @@ export class WeixinBridgeRuntime {
       finalTextPreview: truncateDebugText(finalText),
       artifactCount: artifactMessages.length,
       streamedPreview: truncateDebugText(streamState.streamedText),
+      streamedFinalAnswerPreview: truncateDebugText(streamState.streamedFinalAnswerText),
       previewChunkCount: streamState.sentChunkCount,
     });
     if (outputState !== 'complete') {
       let partialCommitDelivery: DeliveryResult | null = null;
       if (outputState === 'partial' && normalizedFinal) {
-        const previewText = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
+        const previewText = isComparablePrefix(streamState.streamedFinalAnswerText, finalText)
+          ? streamState.streamedFinalAnswerText
+          : '';
         const commitContent = resolveFinalCommitContent(finalText, previewText);
         if (!commitContent) {
           return {
@@ -874,7 +894,9 @@ export class WeixinBridgeRuntime {
       throw new Error(this.i18n.t('runtime.error.finalTextMissing', { scopeId: event.externalScopeId }));
     }
 
-    let deliveredPrefix = isComparablePrefix(streamState.streamedText, finalText) ? streamState.streamedText : '';
+    let deliveredPrefix = isComparablePrefix(streamState.streamedFinalAnswerText, finalText)
+      ? streamState.streamedFinalAnswerText
+      : '';
     if (normalizeComparableText(deliveredPrefix) === normalizedFinal) {
       return {
         source: codexTurnMeta?.finalSource ?? 'thread_items',
@@ -1744,12 +1766,14 @@ function createStreamState(): StreamState {
   return {
     lastObservedFinal: '',
     pendingPreview: '',
+    pendingPreviewSegments: [],
     previewPumpPromise: null,
     previewStopped: false,
     firstPreviewSent: false,
     nextPreviewAt: 0,
     smallPreviewDelayUntil: 0,
     streamedText: '',
+    streamedFinalAnswerText: '',
     sentChunkCount: 0,
     streamingDisabled: false,
   };
@@ -1877,6 +1901,68 @@ function appendPreviewText(streamState: StreamState, chunk: string): void {
   streamState.streamedText = streamState.streamedText
     ? `${streamState.streamedText}\n\n${chunk}`
     : chunk;
+}
+
+function appendFinalAnswerPreviewText(streamState: StreamState, chunk: string): void {
+  const normalizedChunk = String(chunk ?? '').trim();
+  if (!normalizedChunk) {
+    return;
+  }
+  streamState.streamedFinalAnswerText = streamState.streamedFinalAnswerText
+    ? `${streamState.streamedFinalAnswerText}\n\n${normalizedChunk}`
+    : normalizedChunk;
+}
+
+function appendPendingPreviewSegment(
+  streamState: StreamState,
+  outputKind: PendingPreviewSegment['outputKind'],
+  text: string,
+): void {
+  const pendingText = String(text ?? '');
+  if (!pendingText) {
+    return;
+  }
+  streamState.pendingPreview += pendingText;
+  const lastSegment = streamState.pendingPreviewSegments[streamState.pendingPreviewSegments.length - 1];
+  if (lastSegment?.outputKind === outputKind) {
+    lastSegment.text += pendingText;
+    return;
+  }
+  streamState.pendingPreviewSegments.push({ outputKind, text: pendingText });
+}
+
+function consumePendingPreviewSegments(
+  streamState: StreamState,
+  consumedText: string,
+): { finalAnswerText: string } {
+  let remaining = String(consumedText ?? '').length;
+  let finalAnswerText = '';
+  while (remaining > 0 && streamState.pendingPreviewSegments.length > 0) {
+    const segment = streamState.pendingPreviewSegments[0];
+    const consumedLength = Math.min(remaining, segment.text.length);
+    const consumedSegmentText = segment.text.slice(0, consumedLength);
+    if (segment.outputKind === 'final_answer') {
+      finalAnswerText += consumedSegmentText;
+    }
+    segment.text = segment.text.slice(consumedLength);
+    remaining -= consumedLength;
+    if (!segment.text) {
+      streamState.pendingPreviewSegments.shift();
+    }
+  }
+  return { finalAnswerText };
+}
+
+function trimLeadingPendingPreviewSegments(streamState: StreamState): void {
+  while (streamState.pendingPreviewSegments.length > 0) {
+    const segment = streamState.pendingPreviewSegments[0];
+    const trimmedText = segment.text.replace(/^[\s\n]+/u, '');
+    if (trimmedText) {
+      segment.text = trimmedText;
+      return;
+    }
+    streamState.pendingPreviewSegments.shift();
+  }
 }
 
 function trimOverlappingPreviewDelta(streamState: StreamState, delta: string): string {

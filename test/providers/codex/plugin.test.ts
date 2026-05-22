@@ -178,6 +178,43 @@ test('CodexProviderPlugin uses per-profile clients and forwards default model in
   assert.match(String(seenDeveloperInstructions ?? ''), /thread\/session lifecycle, slash-command state transitions, and final platform delivery/i);
 });
 
+test('CodexProviderPlugin forwards user approvals reviewer to clear auto review', async () => {
+  const calls: any[] = [];
+  const plugin = makePlugin(() => ({
+    async start() {},
+    async startTurn(params: any) {
+      calls.push(['startTurn', params]);
+      return {
+        threadId: params.threadId,
+        turnId: 'turn-1',
+        outputText: 'done',
+        outputState: 'complete',
+        finalSource: 'thread_items',
+      };
+    },
+  }));
+  const profile = makeProfile({ defaultModel: 'gpt-5.4' });
+
+  await plugin.startTurn({
+    providerProfile: profile,
+    bridgeSession: makeBridgeSession({
+      codexThreadId: 'thread-1',
+      title: 'Existing thread',
+    }),
+    sessionSettings: makeSessionSettings({
+      approvalsReviewer: 'user',
+    }),
+    event: {
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: 'hello',
+    },
+    inputText: 'hello',
+  });
+
+  assert.equal(calls[0]?.[1]?.approvalsReviewer, 'user');
+});
+
 test('CodexProviderPlugin forwards native thread goal operations to the app client', async () => {
   const calls: any[] = [];
   const plugin = makePlugin(() => ({

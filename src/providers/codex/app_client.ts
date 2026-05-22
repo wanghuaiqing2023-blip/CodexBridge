@@ -3506,8 +3506,15 @@ function mapSandboxPolicy(mode) {
   return { type: 'workspaceWrite' };
 }
 
-function normalizeApprovalsReviewerForRequest(value: unknown): 'auto_review' | null {
-  return String(value ?? '').trim() === 'auto_review' ? 'auto_review' : null;
+function normalizeApprovalsReviewerForRequest(value: unknown): 'user' | 'auto_review' | null {
+  const normalized = String(value ?? '').trim();
+  if (normalized === 'auto_review') {
+    return 'auto_review';
+  }
+  if (normalized === 'user') {
+    return 'user';
+  }
+  return null;
 }
 
 const TERMINAL_TURN_STATUS_KEYS = new Set([

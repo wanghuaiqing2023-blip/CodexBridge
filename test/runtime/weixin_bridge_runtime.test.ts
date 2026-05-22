@@ -1511,6 +1511,41 @@ test('WeixinBridgeRuntime sends only the trailing tail when the final response e
   ]);
 });
 
+test('WeixinBridgeRuntime does not resend complete final after commentary plus final-answer preview', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const finalText = 'Final answer first.\n\nFinal answer second.';
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: 'Checking context.\n\n',
+          delta: 'Checking context.\n\n',
+          outputKind: 'commentary',
+        });
+        await waitForCondition(() => sent.length >= 1);
+        await options.onProgress?.({
+          text: `${finalText}\n\n`,
+          delta: `${finalText}\n\n`,
+          outputKind: 'final_answer',
+        });
+        await waitForCondition(() => sent.some((message) => message.content === finalText));
+        return completeResponse(finalText);
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'Checking context.' },
+    { externalScopeId: 'wxid_1', content: finalText },
+  ]);
+});
+
 test('WeixinBridgeRuntime merges commentary and final-answer progress into the preview stream', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const runtime = makeRuntime({

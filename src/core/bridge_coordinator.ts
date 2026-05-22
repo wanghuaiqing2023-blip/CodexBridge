@@ -21284,7 +21284,7 @@ function resolveAccessModeForPreset(preset) {
         preset,
         approvalPolicy: 'on-request',
         sandboxMode: 'read-only',
-        approvalsReviewer: null,
+        approvalsReviewer: 'user',
       };
     case 'auto':
       return {
@@ -21298,14 +21298,14 @@ function resolveAccessModeForPreset(preset) {
         preset,
         approvalPolicy: 'never',
         sandboxMode: 'danger-full-access',
-        approvalsReviewer: null,
+        approvalsReviewer: 'user',
       };
     default:
       return {
         preset: 'default',
         approvalPolicy: 'on-request',
         sandboxMode: 'workspace-write',
-        approvalsReviewer: null,
+        approvalsReviewer: 'user',
       };
   }
 }

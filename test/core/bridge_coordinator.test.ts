@@ -13172,7 +13172,19 @@ test('/permissions shows current access settings and updates the preset for the 
   });
   assert.equal(reset.messages[3]?.text ?? '', '审批 reviewer：user');
   const resetSettings = runtime.services.bridgeSessions.getSessionSettings(lastTurn.sessionSettings.bridgeSessionId);
-  assert.equal(resetSettings?.approvalsReviewer ?? null, null);
+  assert.equal(resetSettings?.approvalsReviewer, 'user');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wx-user-1',
+    text: 'manual approval again',
+  });
+
+  const resetTurn = openai.startTurnCalls.at(-1);
+  assert.equal(resetTurn?.sessionSettings?.accessPreset, 'default');
+  assert.equal(resetTurn?.sessionSettings?.approvalPolicy, 'on-request');
+  assert.equal(resetTurn?.sessionSettings?.sandboxMode, 'workspace-write');
+  assert.equal(resetTurn?.sessionSettings?.approvalsReviewer, 'user');
 });
 
 test('/permissions rejects unknown presets', async () => {

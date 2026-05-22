@@ -1511,6 +1511,40 @@ test('WeixinBridgeRuntime sends only the trailing tail when the final response e
   ]);
 });
 
+test('WeixinBridgeRuntime sends only the tail when streamed prefix differs by whitespace', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const streamedPrefix = 'Not necessarily a network issue?\n\nThere are several likely causes?';
+  const committedFinal = 'Not necessarily a network issue? There are several likely causes?\n1. Previous tests ran long.';
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: streamedPrefix,
+          delta: streamedPrefix,
+          outputKind: 'final_answer',
+        });
+        await waitForCondition(() =>
+          sent.map((message) => message.content).join('').replace(/\s+/g, '')
+          === streamedPrefix.replace(/\s+/g, ''),
+        );
+        return completeResponse(committedFinal);
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'Not necessarily a network issue?' },
+    { externalScopeId: 'wxid_1', content: 'There are several likely causes?' },
+    { externalScopeId: 'wxid_1', content: '1. Previous tests ran long.' },
+  ]);
+});
+
 test('WeixinBridgeRuntime does not resend complete final after commentary plus final-answer preview', async () => {
   const sent: Array<{ externalScopeId: string; content: string }> = [];
   const finalText = 'Final answer first.\n\nFinal answer second.';
@@ -1544,6 +1578,39 @@ test('WeixinBridgeRuntime does not resend complete final after commentary plus f
     { externalScopeId: 'wxid_1', content: 'Checking context.' },
     { externalScopeId: 'wxid_1', content: finalText },
   ]);
+});
+
+test('WeixinBridgeRuntime suppresses final resend when streamed final only differs by whitespace', async () => {
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const streamedFinal = 'Final answer first.\n\nFinal answer second.';
+  const committedFinal = 'Final answer first.\nFinal answer second.';
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    previewSoftTargetBytes: 1024,
+    coordinator: {
+      async handleInboundEvent(_event: any, options: any = {}) {
+        await options.onProgress?.({
+          text: streamedFinal,
+          delta: streamedFinal,
+          outputKind: 'final_answer',
+        });
+        await waitForCondition(() =>
+          sent.map((message) => message.content).join('').replace(/\s+/g, '')
+          === streamedFinal.replace(/\s+/g, ''),
+        );
+        return completeResponse(committedFinal);
+      },
+    },
+  });
+
+  await runtime.runOnce();
+
+  assert.equal(
+    sent.map((message) => message.content).join('').replace(/\s+/g, ''),
+    streamedFinal.replace(/\s+/g, ''),
+  );
 });
 
 test('WeixinBridgeRuntime merges commentary and final-answer progress into the preview stream', async () => {

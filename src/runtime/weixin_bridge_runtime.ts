@@ -894,6 +894,15 @@ export class WeixinBridgeRuntime {
       throw new Error(this.i18n.t('runtime.error.finalTextMissing', { scopeId: event.externalScopeId }));
     }
 
+    if (hasSameContentIgnoringWhitespace(streamState.streamedFinalAnswerText, finalText)) {
+      return {
+        source: codexTurnMeta?.finalSource ?? 'thread_items',
+        mode: 'preview_already_complete',
+        finalText,
+        sentContent: '',
+      };
+    }
+
     let deliveredPrefix = isComparablePrefix(streamState.streamedFinalAnswerText, finalText)
       ? streamState.streamedFinalAnswerText
       : '';
@@ -1859,11 +1868,46 @@ function resolveFinalCommitContent(finalText: string, previewText: string): stri
   if (!previewContent) {
     return finalContent;
   }
+  if (hasSameContentIgnoringWhitespace(previewContent, finalContent)) {
+    return '';
+  }
   if (finalContent.startsWith(previewContent)) {
     const trailing = finalContent.slice(previewContent.length).trim();
     return trailing || '';
   }
+  const whitespaceInsensitiveTrailing = sliceAfterWhitespaceInsensitivePrefix(finalContent, previewContent);
+  if (whitespaceInsensitiveTrailing !== null) {
+    return whitespaceInsensitiveTrailing;
+  }
   return finalContent;
+}
+
+function sliceAfterWhitespaceInsensitivePrefix(fullText: string, prefixText: string): string | null {
+  const full = String(fullText ?? '');
+  const prefix = String(prefixText ?? '');
+  let fullIndex = 0;
+  let prefixIndex = 0;
+  let consumedNonWhitespace = false;
+  while (prefixIndex < prefix.length) {
+    const prefixChar = prefix[prefixIndex];
+    if (/\s/u.test(prefixChar)) {
+      prefixIndex += 1;
+      continue;
+    }
+    while (fullIndex < full.length && /\s/u.test(full[fullIndex])) {
+      fullIndex += 1;
+    }
+    if (fullIndex >= full.length || full[fullIndex] !== prefixChar) {
+      return null;
+    }
+    consumedNonWhitespace = true;
+    fullIndex += 1;
+    prefixIndex += 1;
+  }
+  if (!consumedNonWhitespace) {
+    return null;
+  }
+  return full.slice(fullIndex).trim();
 }
 
 function advanceDeliveredPrefix(finalText: string, currentPrefix: string, deliveredText: string): string {
@@ -1893,7 +1937,17 @@ function isComparablePrefix(prefixText: string, fullText: string): boolean {
   if (!prefix) {
     return false;
   }
-  return full.startsWith(prefix);
+  return full.startsWith(prefix) || sliceAfterWhitespaceInsensitivePrefix(full, prefix) !== null;
+}
+
+function normalizeContentKey(value: string): string {
+  return String(value ?? '').replace(/\s+/g, '');
+}
+
+function hasSameContentIgnoringWhitespace(left: string, right: string): boolean {
+  const leftKey = normalizeContentKey(left);
+  const rightKey = normalizeContentKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
 function appendPreviewText(streamState: StreamState, chunk: string): void {

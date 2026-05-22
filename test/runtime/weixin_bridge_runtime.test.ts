@@ -451,6 +451,56 @@ test('WeixinBridgeRuntime runs /goal in the background so /allow can approve the
   ]);
 });
 
+test('WeixinBridgeRuntime runs /retry in the background so /status can be handled while it is active', async () => {
+  let finishRetry!: () => void;
+  const retryStarted = new Promise<void>((resolve) => {
+    finishRetry = resolve;
+  });
+  const sent: Array<{ externalScopeId: string; content: string }> = [];
+  const runtime = makeRuntime({
+    sendText: async ({ externalScopeId, content }) => {
+      sent.push({ externalScopeId, content });
+    },
+    coordinator: {
+      async handleInboundEvent(event: any) {
+        if (event.text === '/retry') {
+          await retryStarted;
+          return completeResponse('retry final');
+        }
+        if (event.text === '/status') {
+          return completeResponse('status ok');
+        }
+        return completeResponse('unexpected');
+      },
+    },
+  });
+
+  const retryOutcome = await Promise.race([
+    runtime.dispatchInboundEvent({
+      platform: 'weixin',
+      externalScopeId: 'wxid_1',
+      text: '/retry',
+    } as any),
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
+  ]);
+
+  assert.notEqual(retryOutcome, 'timeout');
+  assert.equal((retryOutcome as any)?.type, 'scheduled');
+
+  await runtime.dispatchInboundEvent({
+    platform: 'weixin',
+    externalScopeId: 'wxid_1',
+    text: '/status',
+  } as any);
+
+  assert.deepEqual(sent, [
+    { externalScopeId: 'wxid_1', content: 'status ok' },
+  ]);
+
+  finishRetry();
+  await (retryOutcome as any).completion;
+});
+
 test('WeixinBridgeRuntime merges an image-only inbound message with the next text message into one Codex turn', async () => {
   const seen: Array<{ text: string; attachmentCount: number }> = [];
   const sent: Array<{ externalScopeId: string; content: string }> = [];

@@ -127,6 +127,7 @@ const DEFAULT_CODEX_NATIVE_API_HOST = '127.0.0.1';
 const DEFAULT_CODEX_NATIVE_API_PORT = 43182;
 const CODEX_EXPERIMENTAL_PROVIDER_KIND_SET = new Set(['codex', 'openai-native', 'openai-compatible']);
 const BACKGROUND_TARGET_ALIAS_TTL_MS = 30 * 60 * 1000;
+const PREVIOUS_FOREGROUND_BRIDGE_SESSION_ID_METADATA_KEY = 'previousForegroundBridgeSessionId';
 
 export const AGENT_COMMAND_SKILL_ACTIONS = new Set([
   'create_draft',
@@ -1390,6 +1391,8 @@ export class BridgeCoordinator {
         return this.handlePrevThreadsCommand(event);
       case 'open':
         return this.handleOpenCommand(event, command.args);
+      case 'back':
+        return this.handleBackCommand(event);
       case 'rename':
         return this.handleRenameCommand(event, command.args);
       case 'peek':
@@ -2138,6 +2141,7 @@ export class BridgeCoordinator {
         trigger: 'new-command',
       },
     });
+    this.rememberPreviousForegroundSession(nextSession.id, existing?.id ?? null);
     const lines = [
       ...(active ? [this.t('coordinator.new.handoff')] : []),
       this.t('coordinator.new.created'),
@@ -4452,6 +4456,9 @@ export class BridgeCoordinator {
         visibility: 'foreground',
       });
     }
+    if (currentSession?.id && currentSession.id !== session.id) {
+      this.rememberPreviousForegroundSession(session.id, currentSession.id);
+    }
     const messages = [
       ...(currentActive?.bridgeSessionId && currentActive.bridgeSessionId !== session.id
         ? [this.t('coordinator.open.handoff')]
@@ -4473,6 +4480,64 @@ export class BridgeCoordinator {
       // Keep /open usable even if the provider thread cannot be reopened for preview.
     }
     return messageResponse(messages, buildSessionMeta(session));
+  }
+
+  handleBackCommand(event) {
+    const scopeRef = toScopeRef(event);
+    const currentSession = this.bridgeSessions.resolveScopeSession(scopeRef);
+    if (!currentSession) {
+      return messageResponse([
+        this.t('coordinator.back.none'),
+      ], this.buildScopedSessionMeta(event));
+    }
+    const previousBridgeSessionId = this.resolvePreviousForegroundBridgeSessionId(currentSession.id);
+    const previousSession = previousBridgeSessionId
+      ? this.bridgeSessions.getSessionById(previousBridgeSessionId)
+      : null;
+    if (!previousSession || previousSession.id === currentSession.id) {
+      return messageResponse([
+        this.t('coordinator.back.none'),
+      ], buildSessionMeta(currentSession));
+    }
+    const currentActive = this.activeTurns?.resolveTurnByBridgeSessionId(currentSession.id) ?? null;
+    if (currentActive?.bridgeSessionId) {
+      this.activeTurns?.updateSessionTurn(currentActive.bridgeSessionId, {
+        visibility: 'background',
+      });
+    }
+    this.bridgeSessions.bindScopeToExistingSession(scopeRef, previousSession.id);
+    const previousActive = this.activeTurns?.resolveTurnByBridgeSessionId(previousSession.id) ?? null;
+    if (previousActive?.bridgeSessionId) {
+      this.activeTurns?.updateSessionTurn(previousActive.bridgeSessionId, {
+        visibility: 'foreground',
+      });
+    }
+    this.rememberPreviousForegroundSession(previousSession.id, currentSession.id);
+    const messages = [
+      ...(currentActive?.bridgeSessionId ? [this.t('coordinator.open.handoff')] : []),
+      this.t('coordinator.back.switched'),
+      this.t('coordinator.open.opened', { threadId: previousSession.codexThreadId }),
+      this.t('coordinator.status.providerProfile', { id: previousSession.providerProfileId }),
+      this.t('coordinator.status.bridgeSession', { id: previousSession.id }),
+    ];
+    return messageResponse(messages, buildSessionMeta(previousSession));
+  }
+
+  resolvePreviousForegroundBridgeSessionId(bridgeSessionId) {
+    const value = this.bridgeSessions.getSessionSettings(bridgeSessionId)?.metadata?.[
+      PREVIOUS_FOREGROUND_BRIDGE_SESSION_ID_METADATA_KEY
+    ];
+    const normalized = String(value ?? '').trim();
+    return normalized ? normalized : null;
+  }
+
+  rememberPreviousForegroundSession(bridgeSessionId, previousBridgeSessionId) {
+    const normalized = String(previousBridgeSessionId ?? '').trim();
+    this.bridgeSessions.upsertSessionSettings(bridgeSessionId, {
+      metadata: {
+        [PREVIOUS_FOREGROUND_BRIDGE_SESSION_ID_METADATA_KEY]: normalized || null,
+      },
+    });
   }
 
   async handleModelsCommand(event) {
@@ -18672,6 +18737,21 @@ function getCommandHelpSpecs(i18n: Translator) {
       i18n.t('coordinator.help.note.open'),
     ],
   }),
+  back: freezeCommandHelp({
+    name: 'back',
+    aliases: [],
+    summary: i18n.t('coordinator.help.summary.back'),
+    usage: [
+      '/back',
+      '/back -h',
+    ],
+    examples: [
+      '/back',
+    ],
+    notes: [
+      i18n.t('coordinator.help.note.back'),
+    ],
+  }),
   peek: freezeCommandHelp({
     name: 'peek',
     aliases: ['pk'],
@@ -18863,6 +18943,7 @@ const COMMAND_HELP_ORDER = Object.freeze([
   'next',
   'prev',
   'open',
+  'back',
   'peek',
   'rename',
   'permissions',
@@ -18913,6 +18994,7 @@ const COMMAND_ALIAS_DEFINITIONS = Object.freeze({
   next: ['nx'],
   prev: ['pv'],
   open: ['o'],
+  back: [],
   peek: ['pk'],
   rename: ['rn'],
   permissions: ['perm'],

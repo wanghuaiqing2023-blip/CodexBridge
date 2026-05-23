@@ -6627,6 +6627,153 @@ test('/open demotes the previous running foreground turn before its final arrive
   assert.notEqual(finalText.trim(), 'old foreground final: long foreground task');
 });
 
+test('/back toggles between the two most recent foreground sessions after /new', async () => {
+  const { runtime } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-back-new' };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const firstSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(firstSession);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const secondSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(secondSession);
+  assert.notEqual(secondSession.id, firstSession.id);
+
+  const backToFirst = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, firstSession.id);
+  assert.match(backToFirst.messages.map((message) => message.text ?? '').join('\n'), new RegExp(firstSession.codexThreadId));
+
+  const backToSecond = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, secondSession.id);
+  assert.match(backToSecond.messages.map((message) => message.text ?? '').join('\n'), new RegExp(secondSession.codexThreadId));
+});
+
+test('/back toggles back to the previous foreground after /open', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-back-open' };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const firstSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(firstSession);
+  const targetThread = await openai.startThread({
+    providerProfile: { id: 'openai-default', displayName: 'OpenAI Default' },
+    cwd: 'C:\\work\\target',
+    title: 'target thread',
+    metadata: null,
+  });
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({
+    ...scopeRef,
+    text: `/open ${targetThread.threadId}`,
+  });
+  const openedSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(openedSession);
+  assert.equal(openedSession.codexThreadId, targetThread.threadId);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, firstSession.id);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, openedSession.id);
+});
+
+test('/back promotes a running background turn and demotes a running foreground turn', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-back-running' };
+  let releaseFirstTurn: (value?: unknown) => void = () => {};
+  const firstGate = new Promise((resolve) => { releaseFirstTurn = resolve; });
+
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = bridgeSession.codexThreadId + '-turn-1';
+    await onTurnStarted?.({ turnId, threadId: bridgeSession.codexThreadId });
+    await firstGate;
+    return {
+      outputText: 'done: ' + inputText,
+      outputState: 'complete',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const firstTurn = runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'long first turn' });
+  await waitForCondition(() => {
+    const session = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+    return session
+      ? runtime.services.activeTurns.resolveTurnByBridgeSessionId(session.id)?.turnId
+      : null;
+  });
+  const firstSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(firstSession);
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const secondSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(secondSession);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(firstSession.id)?.visibility, 'background');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, firstSession.id);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(firstSession.id)?.visibility, 'foreground');
+
+  releaseFirstTurn();
+  const final = await firstTurn;
+  assert.match(final.messages.map((message) => message.text ?? '').join('\n'), /done: long first turn/);
+});
+
+test('/back demotes the current running foreground turn to background', async () => {
+  const { runtime, openai } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-back-demotes-current' };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const firstSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(firstSession);
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/new' });
+  const secondSession = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(secondSession);
+
+  let releaseSecondTurn: (value?: unknown) => void = () => {};
+  const secondGate = new Promise((resolve) => { releaseSecondTurn = resolve; });
+  openai.startTurn = async ({ bridgeSession, inputText, onTurnStarted = null }) => {
+    const turnId = bridgeSession.codexThreadId + '-turn-1';
+    await onTurnStarted?.({ turnId, threadId: bridgeSession.codexThreadId });
+    await secondGate;
+    return {
+      outputText: 'done: ' + inputText,
+      outputState: 'complete',
+      turnId,
+      threadId: bridgeSession.codexThreadId,
+      title: bridgeSession.title,
+    };
+  };
+
+  const secondTurn = runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'long second turn' });
+  await waitForCondition(() => runtime.services.activeTurns.resolveTurnByBridgeSessionId(secondSession.id)?.turnId);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(secondSession.id)?.visibility, 'foreground');
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, firstSession.id);
+  assert.equal(runtime.services.activeTurns.resolveTurnByBridgeSessionId(secondSession.id)?.visibility, 'background');
+
+  releaseSecondTurn();
+  const final = await secondTurn;
+  assert.match(final.messages.map((message) => message.text ?? '').join('\n'), /background|后台/i);
+});
+
+test('/back reports a visible message when there is no previous foreground session', async () => {
+  const { runtime } = makeRuntime();
+  const scopeRef = { platform: 'weixin', externalScopeId: 'wx-back-none' };
+
+  await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: 'hello' });
+  const current = runtime.services.bridgeSessions.resolveScopeSession(scopeRef);
+  assert.ok(current);
+
+  const result = await runtime.services.bridgeCoordinator.handleInboundEvent({ ...scopeRef, text: '/back' });
+
+  assert.equal(runtime.services.bridgeSessions.resolveScopeSession(scopeRef)?.id, current.id);
+  assert.ok(result.messages.map((message) => message.text ?? '').join('\n').trim().length > 0);
+});
+
 test('/threads stop interrupts a background running thread', async () => {
   const { runtime, openai } = makeRuntime();
   const scopeRef = { platform: 'weixin', externalScopeId: 'wx-background-stop' };

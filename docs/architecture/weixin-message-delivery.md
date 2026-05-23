@@ -1,9 +1,13 @@
-# WeChat Duplicate Message Delivery TODO
+# WeChat Message Delivery Reference
 
-This document tracks the already-observed duplicate or heavily overlapping
-WeChat message delivery problem.
+This document records already-observed duplicate or heavily overlapping WeChat
+message delivery problems and the fixes that landed.
 
-## Current Finding
+Status: the confirmed CodexBridge-side duplicate paths documented here have
+been fixed. Keep this file as a diagnostic reference. Reopen active TODO work
+only if new logs prove a distinct duplicate-delivery path.
+
+## Confirmed Findings
 
 The issue is confirmed in the real WeChat runtime. At least one observed
 `/threads del` turn had only one inbound WeChat `messageId`, and
@@ -37,9 +41,9 @@ Observed log anchors:
 This is not a multi-process issue and not merely a stale provider final. It is
 still in the runtime final-delivery decision path.
 
-## Suspected Root Cause
+## Root Causes
 
-`WeixinBridgeRuntime` currently records streamed preview text in one combined
+`WeixinBridgeRuntime` previously recorded streamed preview text in one combined
 `streamState.streamedText` buffer.
 
 That buffer can contain both:
@@ -55,18 +59,18 @@ final answer, so the runtime falls back to sending the full final answer.
 Result: the user can receive already-streamed final-answer content again.
 
 The first fix split final-answer preview accounting from mixed commentary
-preview accounting. However, another edge remains: `isComparablePrefix()` uses
-normalized text comparison, while `resolveFinalCommitContent()` still computes
-the tail with raw `finalContent.startsWith(previewContent)`.
+preview accounting. A later fix handled another edge: `isComparablePrefix()`
+uses normalized text comparison, while `resolveFinalCommitContent()` originally
+computed the tail with raw `finalContent.startsWith(previewContent)`.
 
 In real output, the preview and final can be semantically the same prefix but
 not byte-for-byte identical because of chunk boundaries, inserted blank lines,
 or whitespace normalization. Debug previews collapse whitespace, so the logs can
-look identical while raw `startsWith()` still fails. When it fails,
-`resolveFinalCommitContent()` returns the whole final answer, causing
+look identical while raw `startsWith()` still fails. When it failed,
+`resolveFinalCommitContent()` returned the whole final answer, causing
 `full_final_commit`.
 
-## Fix Direction
+## Implemented Fixes
 
 - Split preview accounting into at least two concepts:
   - all streamed text for debug/observability
@@ -84,7 +88,7 @@ look identical while raw `startsWith()` still fails. When it fails,
 
 ## Regression Tests
 
-Add focused tests for `WeixinBridgeRuntime` covering:
+Focused `WeixinBridgeRuntime` tests cover:
 
 - commentary preview is sent
 - final-answer preview is sent afterward

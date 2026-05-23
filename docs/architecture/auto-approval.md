@@ -1,7 +1,10 @@
-# Auto Approval TODO
+# Auto Approval Reference
 
-This document tracks the planned CodexBridge work needed to expose Codex
+This document records the implemented CodexBridge work that exposes Codex
 app-server automatic approval to WeChat users.
+
+Status: implemented. Keep this file as a behavior reference, not an active
+roadmap item.
 
 ## Goal
 
@@ -50,9 +53,9 @@ sandbox: workspace-write
 approval reviewer: auto_review
 ```
 
-## Required Data Model Changes
+## Data Model
 
-Extend the bridge session settings with an approval reviewer field.
+The bridge session settings include an approval reviewer field.
 
 Candidate shape:
 
@@ -77,10 +80,10 @@ Rules:
 
 ## Provider / app-server Integration
 
-CodexBridge needs to pass `approvalsReviewer` through to the Codex app-server
-wherever a new turn can be created or continued.
+CodexBridge passes `approvalsReviewer` through to the Codex app-server wherever
+a new turn can be created or continued.
 
-Required call paths to inspect and update:
+Covered call paths:
 
 - `thread/start`
 - `thread/resume`
@@ -156,9 +159,10 @@ Requirements:
 - `/stop` keeps its current foreground-only semantics.
 - `/threads stop <target>` remains the background stop path.
 
-## Status and Help Updates
+## Status and Help
 
-Update user-facing documentation and command help after implementation:
+User-facing documentation and command help should continue to describe this
+mode consistently:
 
 - `README.md`
 - `docs/usage/weixin-slash-commands.md`
@@ -174,9 +178,10 @@ The docs must clearly state:
 
 ## Tests
 
-Add CodexBridge-only tests. Do not require Rust app-server tests for this work.
+CodexBridge-only tests cover this feature. Rust app-server tests are not
+required for this bridge-side behavior.
 
-Suggested tests:
+Covered test areas:
 
 - `/permissions auto` updates session settings with
   `approvalsReviewer: "auto_review"`.
@@ -191,7 +196,7 @@ Suggested tests:
 - Background auto approval denial is delivered as a background terminal
   notification, not as ordinary foreground progress.
 
-Suggested targeted regression command:
+Targeted regression command:
 
 ```bash
 node ./scripts/test.mjs test/providers/codex/app_client.test.ts test/providers/codex/plugin.test.ts test/core/bridge_coordinator.test.ts test/runtime/weixin_bridge_runtime.test.ts
@@ -207,7 +212,7 @@ node ./scripts/test.mjs test/providers/codex/app_client.test.ts test/providers/c
 - Existing manual `/allow`, `/deny`, `/threads allow <target>`, and
   foreground/background control behavior remain intact.
 
-## Open Questions
+## Deferred Questions
 
 - Should Bridge show every auto approval start/completion, or only denied /
   timed-out / aborted reviews? Current preference: only terminal negative

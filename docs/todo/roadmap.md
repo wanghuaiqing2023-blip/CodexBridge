@@ -55,7 +55,6 @@ Rules:
 
 Use these files for detailed implementation work:
 
-- [Auto Approval TODO](./auto-approval.md) - WeChat parity with Codex App automatic approval
 - [Codex Native API TODO](./codex-native-api.md) - retained for later
 - [Codex Gateway TODO](./codex-gateway.md) - paused
 - [Mission Control TODO](./mission-control.md) - paused
@@ -63,6 +62,8 @@ Use these files for detailed implementation work:
 Architecture references:
 
 - [Core architecture](../architecture/codexbridge-core-architecture.md)
+- [Auto approval](../architecture/auto-approval.md)
+- [WeChat message delivery](../architecture/weixin-message-delivery.md)
 - [Codex Native API architecture](../architecture/codex-native-api.md)
 - [Mission Control architecture](../architecture/mission-control.md) - historical reference
 
@@ -84,6 +85,9 @@ Already landed and no longer part of the active detailed backlog:
 - `/automation` draft-confirm flow and WeChat delivery-oriented scheduling
 - Assistant records via `/as`, `/log`, `/todo`, `/remind`, and `/note`
 - WeChat thread browsing with `/threads`, `/open`, `/search`, `/peek`, `/rename`
+- `/back` lightweight foreground switching between the two most recent foreground threads
+- `/permissions auto` / `/perm auto` for Codex app-server automatic approval reviewer mode
+- WeChat duplicate final delivery fixes for preview/final overlap and retry-dispatch blocking
 - Native-ish reconnect, retry, approval, and attachment delivery hardening
 - `@codexbridge/codex-gateway` extracted as an internal package with package tests, boundary checks, and gated live-provider smoke flow
 - `@codexbridge/mission-control` bootstrapped as an internal package skeleton
@@ -101,13 +105,10 @@ affect the product as a whole, not just one package.
 ### P0: WeChat runtime reliability
 
 - [ ] Keep improving native approval, interrupted-turn, reconnect, and retry handling around long-running tasks
-- [ ] Expose Codex app-server automatic approval as a user-selectable WeChat permission mode; see [Auto Approval TODO](./auto-approval.md)
-- [ ] Locate and fix duplicate WeChat message delivery; confirmed preview/final overlap details are tracked in [WeChat Duplicate Message Delivery TODO](./weixin-duplicate-message-delivery.md)
 - [ ] Stabilize WeChat preview/final delivery around send-budget limits, `ret:-2`, and long-reply recovery
 - [ ] Ensure plugin/auth/unavailable-capability failures always surface as clear chat-visible guidance instead of silent stalls
 - [ ] Keep parser/helper/internal bridge threads hidden from normal thread browsing and automatically cleaned up
 - [ ] Keep `/open`, `/threads`, and `/status` optimized for fast real-world session recovery instead of adding redundant resume-style commands
-- [ ] Add `/back` as a lightweight foreground switch command: keep only the current and previous foreground `bridgeSessionId` per WeChat scope, update `previous` whenever foreground changes through `/new`, `/open`, or background-to-foreground switching, and implement `/back` as a swap between current and previous; do not introduce a full history stack
 
 ### P1: Native output and delivery quality
 

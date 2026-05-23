@@ -14,6 +14,7 @@ CodexBridge is a Codex-centered gateway for connecting multiple chat platforms t
 ## Documents
 
 - [Architecture and design baseline](./docs/architecture/codexbridge-architecture-and-design.md)
+- [User manual](./docs/usage/user-manual.md)
 - [Foreground/background thread design](./docs/architecture/foreground-background-thread-design.md)
 - [Foreground/background thread implementation plan](./docs/architecture/foreground-background-thread-implementation-plan.md)
 - [Concepts and code structures](./docs/architecture/codexbridge-concepts-and-code-structures.md)
